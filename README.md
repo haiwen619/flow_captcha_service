@@ -44,6 +44,10 @@ nodeId:childSessionId
 
 - `POST /api/admin/login`
 - `POST /api/admin/logout`
+- `GET /api/admin/profile`
+- `POST /api/admin/credentials`
+- `GET /api/admin/system-config`
+- `POST /api/admin/system-config`
 - `GET /api/admin/apikeys`
 - `POST /api/admin/apikeys`
 - `PATCH /api/admin/apikeys/{api_key_id}`
@@ -55,6 +59,15 @@ nodeId:childSessionId
 - `POST /api/admin/cluster/config/rotate-key`
 - `GET /api/admin/cluster/nodes`
 - `PATCH /api/admin/cluster/nodes/{node_id}`
+
+### 管理面板
+
+- 入口：`GET /admin`
+- 登录后会根据节点角色展示不同内容：
+  - `master`：展示 API Key 管理、Cluster Key 轮换、子节点列表管理
+  - `subnode`：隐藏主节点专属模块，保留运行配置与系统配置
+  - `standalone`：展示基础运行管理能力
+- 系统配置支持在线写入 `config/setting.toml`，部分字段会提示“需要重启服务”。
 
 ## 配置项
 
@@ -128,3 +141,26 @@ docker compose -f docker-compose.cluster.subnode.yml up -d --build
 
 > `subnode` 启动前，需要在 `master` 管理接口获取 `cluster_key`，并写入
 > `FCS_CLUSTER_MASTER_CLUSTER_KEY`。
+
+### 一键起 master + subnode（示例）
+
+```bash
+docker compose -f docker-compose.cluster.stack.yml up -d --build
+```
+
+> `docker-compose.cluster.stack.yml` 默认带占位符：
+> `FCS_CLUSTER_MASTER_CLUSTER_KEY` 与 `FCS_CLUSTER_NODE_API_KEY`。
+> 请在启动前替换为真实值。
+
+## 主节点如何通知子节点关闭
+
+`flow_captcha_service` 没有单独的 `/close` 业务接口，关闭语义通过会话协议实现：
+
+1. `flow2api` 先向 `master` 调用 `POST /api/v1/solve`，master 返回路由 session：
+   `nodeId:childSessionId`
+2. 业务请求成功后，`flow2api` 调 `POST /api/v1/sessions/{session_id}/finish`
+3. `master` 解析路由 session 并转发到对应 `subnode`
+4. `subnode` 执行本地 `runtime.finish()`，通知浏览器打码实例“请求已结束，可关闭”
+5. 若业务失败则走 `POST /api/v1/sessions/{session_id}/error`，会触发提前错误关闭
+
+这就是“主节点告诉子节点关闭”的实际链路：`finish/error` 转发，而不是单独 close。

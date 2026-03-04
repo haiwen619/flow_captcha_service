@@ -15,4 +15,10 @@
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8060/api/v1/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
     restart: unless-stopped

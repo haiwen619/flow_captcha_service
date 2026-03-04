@@ -2,8 +2,10 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .api import admin, cluster, service
 from .core.auth import set_database
@@ -63,6 +65,18 @@ app.add_middleware(
 app.include_router(service.router)
 app.include_router(admin.router)
 app.include_router(cluster.router)
+
+static_dir = config.root_dir / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+@app.get("/admin", include_in_schema=False)
+async def admin_panel():
+    page_path = static_dir / "admin.html"
+    if not page_path.exists():
+        raise HTTPException(status_code=404, detail="管理面板页面不存在")
+    return FileResponse(page_path)
 
 
 @app.get("/")

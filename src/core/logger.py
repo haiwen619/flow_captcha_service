@@ -31,5 +31,8 @@ class DebugLogger:
     def log_debug(self, message: str, *args: Any):
         self._logger.debug(message, *args)
 
+    def refresh_level(self):
+        self._logger.setLevel(getattr(logging, config.log_level, logging.INFO))
+
 
 debug_logger = DebugLogger()

@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import copy
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import tomli
 
@@ -32,7 +33,58 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return merged
 
 
+def _toml_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _toml_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    if value is None:
+        return '""'
+    return _toml_quote(str(value))
+
+
 class Config:
+    ORDERED_TOP_SECTIONS = ("server", "storage", "admin", "captcha", "log", "cluster")
+    ENV_OVERRIDE_KEYS = (
+        "FCS_CONFIG_FILE",
+        "FCS_SERVER_HOST",
+        "FCS_SERVER_PORT",
+        "FCS_DB_PATH",
+        "FCS_ADMIN_USERNAME",
+        "FCS_ADMIN_PASSWORD",
+        "FCS_BROWSER_LAUNCH_BACKGROUND",
+        "FCS_BROWSER_SCORE_DOM_WAIT_SECONDS",
+        "FCS_BROWSER_RECAPTCHA_SETTLE_SECONDS",
+        "FCS_BROWSER_SCORE_TEST_WARMUP_SECONDS",
+        "FCS_FLOW_TIMEOUT",
+        "FCS_UPSAMPLE_TIMEOUT",
+        "FCS_SESSION_TTL_SECONDS",
+        "FCS_NODE_NAME",
+        "FCS_BROWSER_COUNT",
+        "FCS_BROWSER_PROXY_ENABLED",
+        "FCS_BROWSER_PROXY_URL",
+        "FCS_LOG_LEVEL",
+        "FCS_CLUSTER_ROLE",
+        "FCS_CLUSTER_MASTER_BASE_URL",
+        "FCS_CLUSTER_MASTER_CLUSTER_KEY",
+        "FCS_CLUSTER_NODE_PUBLIC_BASE_URL",
+        "FCS_CLUSTER_NODE_API_KEY",
+        "FCS_CLUSTER_HEARTBEAT_INTERVAL_SECONDS",
+        "FCS_CLUSTER_NODE_WEIGHT",
+        "FCS_CLUSTER_NODE_MAX_CONCURRENCY",
+        "FCS_CLUSTER_MASTER_NODE_STALE_SECONDS",
+        "FCS_CLUSTER_MASTER_DISPATCH_TIMEOUT_SECONDS",
+    )
+
     def __init__(self):
         self._root_dir = Path(__file__).resolve().parents[2]
         default_path = self._root_dir / "config" / "setting.toml"
@@ -83,21 +135,100 @@ class Config:
             },
         }
 
+    def _read_user_config(self) -> Dict[str, Any]:
+        if not self._config_path.exists():
+            return {}
+        raw_text = self._config_path.read_text(encoding="utf-8-sig")
+        parsed = tomli.loads(raw_text)
+        if not isinstance(parsed, dict):
+            return {}
+        return parsed
+
     def _load_config(self) -> Dict[str, Any]:
-        config_data = self._defaults()
-        if self._config_path.exists():
-            raw_text = self._config_path.read_text(encoding="utf-8-sig")
-            user_cfg = tomli.loads(raw_text)
-            if isinstance(user_cfg, dict):
-                config_data = _deep_merge(config_data, user_cfg)
-        return config_data
+        return _deep_merge(self._defaults(), self._read_user_config())
 
     def _get(self, section: str, key: str, default: Any = None) -> Any:
         return self._config.get(section, {}).get(key, default)
 
+    def _dump_toml(self, data: Dict[str, Any]) -> str:
+        lines: list[str] = []
+        top_keys = list(self.ORDERED_TOP_SECTIONS)
+        top_keys.extend(sorted(k for k in data.keys() if k not in self.ORDERED_TOP_SECTIONS))
+
+        for top_key in top_keys:
+            section_data = data.get(top_key)
+            if not isinstance(section_data, dict):
+                continue
+            self._append_toml_section(lines, top_key, section_data)
+
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _append_toml_section(self, lines: list[str], path: str, section_data: Dict[str, Any]):
+        lines.append(f"[{path}]")
+        for key, value in section_data.items():
+            if isinstance(value, dict):
+                continue
+            lines.append(f"{key} = {_toml_literal(value)}")
+        lines.append("")
+
+        for key, value in section_data.items():
+            if isinstance(value, dict):
+                self._append_toml_section(lines, f"{path}.{key}", value)
+
+    def _normalize_top_level_config(self, payload: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        normalized: Dict[str, Dict[str, Any]] = {}
+        for section, value in payload.items():
+            if not isinstance(section, str) or not isinstance(value, dict):
+                continue
+            clean_section = section.strip()
+            if not clean_section:
+                continue
+            normalized[clean_section] = dict(value)
+        return normalized
+
     @property
     def root_dir(self) -> Path:
         return self._root_dir
+
+    @property
+    def config_path(self) -> Path:
+        return self._config_path
+
+    def reload_config(self):
+        self._config = self._load_config()
+
+    def get_merged_config(self) -> Dict[str, Any]:
+        return copy.deepcopy(self._config)
+
+    def get_active_env_overrides(self) -> Dict[str, str]:
+        active: Dict[str, str] = {}
+        for env_key in self.ENV_OVERRIDE_KEYS:
+            value = os.getenv(env_key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text == "":
+                continue
+            active[env_key] = text
+        return active
+
+    def update_config_sections(self, sections: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = self._normalize_top_level_config(sections)
+        user_cfg = self._read_user_config()
+
+        for section, payload in normalized.items():
+            current = user_cfg.get(section)
+            if not isinstance(current, dict):
+                current = {}
+            for key, value in payload.items():
+                current[key] = value
+            user_cfg[section] = current
+
+        merged_to_write = _deep_merge(self._defaults(), user_cfg)
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._config_path.write_text(self._dump_toml(merged_to_write), encoding="utf-8")
+        self._config = merged_to_write
+        return self.get_merged_config()
 
     @property
     def server_host(self) -> str:

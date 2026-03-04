@@ -81,6 +81,21 @@ class UpdateCaptchaConfigRequest(BaseModel):
     browser_count: int = Field(default=1, ge=1)
 
 
+class UpdateAdminCredentialsRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_username: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    new_password: Optional[str] = Field(default=None, min_length=6, max_length=120)
+
+
+class UpdateSystemConfigRequest(BaseModel):
+    server: Optional[Dict[str, Any]] = None
+    storage: Optional[Dict[str, Any]] = None
+    admin: Optional[Dict[str, Any]] = None
+    captcha: Optional[Dict[str, Any]] = None
+    log: Optional[Dict[str, Any]] = None
+    cluster: Optional[Dict[str, Any]] = None
+
+
 class ClusterRegisterRequest(BaseModel):
     node_name: str = Field(min_length=1, max_length=120)
     base_url: str = Field(min_length=1)

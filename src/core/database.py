@@ -181,6 +181,62 @@ class Database:
                 return False
             return row["password_hash"] == self._hash_secret(password)
 
+    async def get_admin_profile(self) -> Dict[str, Any]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT username, created_at, updated_at FROM service_admin WHERE id = 1"
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return {
+                    "username": config.admin_username,
+                    "created_at": None,
+                    "updated_at": None,
+                }
+            return dict(row)
+
+    async def update_admin_credentials(
+        self,
+        current_password: str,
+        new_username: Optional[str] = None,
+        new_password: Optional[str] = None,
+    ) -> tuple[bool, str, Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT username, password_hash, created_at, updated_at FROM service_admin WHERE id = 1"
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return False, "管理员账号不存在", {}
+
+            if row["password_hash"] != self._hash_secret(current_password):
+                return False, "当前密码错误", {}
+
+            username = (new_username or row["username"] or "").strip()
+            if not username:
+                return False, "用户名不能为空", {}
+
+            password_hash = row["password_hash"]
+            if new_password:
+                password_hash = self._hash_secret(new_password)
+
+            await db.execute(
+                """
+                UPDATE service_admin
+                SET username = ?,
+                    password_hash = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+                """,
+                (username, password_hash),
+            )
+            await db.commit()
+
+        profile = await self.get_admin_profile()
+        return True, "管理员账号更新成功", profile
+
     async def get_captcha_config(self) -> CaptchaConfig:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
