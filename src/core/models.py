@@ -118,7 +118,6 @@ class ClusterHeartbeatRequest(BaseModel):
 class ClusterNodeUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
     weight: Optional[int] = Field(default=None, ge=1)
-    max_concurrency: Optional[int] = Field(default=None, ge=1)
 
 
 @dataclass

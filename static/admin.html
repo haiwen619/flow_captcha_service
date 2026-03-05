@@ -309,6 +309,7 @@
 
       <section id="masterClusterPanel" class="panel hidden">
         <h2>主节点集群管理</h2>
+        <p class="panel-desc">调度上限由子节点上报容量自动同步，需在子节点侧调整线程相关配置。</p>
         <div class="grid">
           <div class="field"><label>当前 Cluster Key</label><input id="clusterKey" readonly /></div>
           <div class="field"><label>当前节点名称</label><input id="clusterNodeName" readonly /></div>
@@ -565,7 +566,9 @@
         const b = q("clusterNodesTable"); b.innerHTML = "";
         for (const it of (r.items || [])) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${it.id}</td><td>${it.node_name || "-"}</td><td>${it.base_url || "-"}</td><td>${it.healthy ? "健康" : "异常"}</td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${it.thread_total ?? it.max_concurrency ?? 1}</td><td>${it.thread_idle ?? "-"}</td><td><input data-node-id="${it.id}" data-node-key="max_concurrency" value="${it.max_concurrency ?? 1}" /></td><td><input data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td>${it.last_heartbeat_at || "-"}</td><td><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button></td>`;
+          const threadTotal = it.thread_total ?? it.max_concurrency ?? 1;
+          const scheduleLimitText = `${it.max_concurrency ?? threadTotal}<span class="hint" style="display:block">自动同步</span>`;
+          tr.innerHTML = `<td>${it.id}</td><td>${it.node_name || "-"}</td><td>${it.base_url || "-"}</td><td>${it.healthy ? "健康" : "异常"}</td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${threadTotal}</td><td>${it.thread_idle ?? "-"}</td><td>${scheduleLimitText}</td><td><input data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td>${it.last_heartbeat_at || "-"}</td><td><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button></td>`;
           b.appendChild(tr);
         }
       };
@@ -698,8 +701,7 @@
           try {
             const enabledEl = document.querySelector(`input[data-node-id="${id}"][data-node-key="enabled"]`);
             const weightEl = document.querySelector(`input[data-node-id="${id}"][data-node-key="weight"]`);
-            const maxEl = document.querySelector(`input[data-node-id="${id}"][data-node-key="max_concurrency"]`);
-            await req(`/api/admin/cluster/nodes/${id}`, { method: "PATCH", body: { enabled: !!enabledEl?.checked, weight: toInt(weightEl?.value, 100), max_concurrency: toInt(maxEl?.value, 1) } });
+            await req(`/api/admin/cluster/nodes/${id}`, { method: "PATCH", body: { enabled: !!enabledEl?.checked, weight: toInt(weightEl?.value, 100) } });
             await loadClusterNodes(); showNotice(`子节点 #${id} 已保存。`, "ok");
           } catch (err) { showNotice(`保存子节点失败：${err.message}`, "err"); }
         }

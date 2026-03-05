@@ -753,7 +753,6 @@ async def update_cluster_node(
         node_id=node_id,
         enabled=request.enabled,
         weight=request.weight,
-        max_concurrency=request.max_concurrency,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="节点不存在")
