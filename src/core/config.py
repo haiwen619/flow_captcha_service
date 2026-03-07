@@ -87,10 +87,32 @@ class Config:
 
     def __init__(self):
         self._root_dir = Path(__file__).resolve().parents[2]
-        default_path = self._root_dir / "config" / "setting.toml"
+        default_path = self._root_dir / "data" / "setting.toml"
+        self._legacy_config_path = self._root_dir / "config" / "setting.toml"
+        self._example_config_path = self._root_dir / "config" / "setting_example.toml"
         env_path = os.getenv("FCS_CONFIG_FILE", "").strip()
         self._config_path = Path(env_path) if env_path else default_path
+        self._config_path = self._resolve_config_path(self._config_path)
         self._config = self._load_config()
+
+    def _resolve_config_path(self, preferred_path: Path) -> Path:
+        resolved_path = preferred_path if preferred_path.is_absolute() else (self._root_dir / preferred_path)
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Respect explicit custom config paths.
+        if resolved_path.exists() or os.getenv("FCS_CONFIG_FILE", "").strip():
+            return resolved_path
+
+        # One-time migration: move the old config into the persistent data directory.
+        if resolved_path == (self._root_dir / "data" / "setting.toml"):
+            if self._legacy_config_path.exists():
+                resolved_path.write_text(self._legacy_config_path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+                return resolved_path
+            if self._example_config_path.exists():
+                resolved_path.write_text(self._example_config_path.read_text(encoding="utf-8-sig"), encoding="utf-8")
+                return resolved_path
+
+        return resolved_path
 
     def _defaults(self) -> Dict[str, Any]:
         return {

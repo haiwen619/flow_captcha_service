@@ -58,12 +58,13 @@ flow2api
 ### 1. 配置文件位置
 
 - 模板：`config/setting_example.toml`
-- 实际：`config/setting.toml`
+- Persisted runtime config: `data/setting.toml`
+- Migration: if legacy `config/setting.toml` exists, it is copied to `data/setting.toml` on startup
 
 首次使用：
 
 ```bash
-cp config/setting_example.toml config/setting.toml
+cp config/setting_example.toml data/setting.toml
 ```
 
 ### 2. 修改配置的两种方式
@@ -74,7 +75,7 @@ cp config/setting_example.toml config/setting.toml
 - 可在线修改运行配置与系统配置
 - 会提示哪些改动需要重启服务
 
-#### B. 直接编辑 `setting.toml`
+#### B. Edit `data/setting.toml` directly
 
 - 修改后重启服务生效（部分配置可热生效，但建议按重启策略执行）
 

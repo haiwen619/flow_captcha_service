@@ -8,3 +8,5 @@ config/setting.toml
 data/*.db
 data/*.db-*
 playwright-report/
+
+data/setting.toml

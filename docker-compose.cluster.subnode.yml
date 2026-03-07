@@ -12,6 +12,7 @@
       - XVFB_WHD=1920x1080x24
       - FCS_SERVER_HOST=0.0.0.0
       - FCS_SERVER_PORT=8060
+      - FCS_CONFIG_FILE=/app/data/setting.toml
       - FCS_CLUSTER_ROLE=subnode
       - FCS_NODE_NAME=subnode-1
       - FCS_CLUSTER_MASTER_BASE_URL=http://host.docker.internal:8060

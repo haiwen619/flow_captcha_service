@@ -9,6 +9,7 @@ services:
     environment:
       - FCS_SERVER_HOST=0.0.0.0
       - FCS_SERVER_PORT=8060
+      - FCS_CONFIG_FILE=/app/data/setting.toml
       - FCS_CLUSTER_ROLE=master
       - FCS_NODE_NAME=${FCS_MASTER_NODE_NAME:-master-1}
       - FCS_LOG_LEVEL=${FCS_LOG_LEVEL:-INFO}
