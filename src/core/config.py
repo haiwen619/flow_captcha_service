@@ -81,6 +81,7 @@ class Config:
         "FCS_BROWSER_SCORE_DOM_WAIT_SECONDS",
         "FCS_BROWSER_RECAPTCHA_SETTLE_SECONDS",
         "FCS_BROWSER_SCORE_TEST_WARMUP_SECONDS",
+        "FCS_BROWSER_IDLE_TTL_SECONDS",
         "FCS_FLOW_TIMEOUT",
         "FCS_UPSAMPLE_TIMEOUT",
         "FCS_SESSION_TTL_SECONDS",
@@ -151,6 +152,7 @@ class Config:
                 "browser_score_dom_wait_seconds": 25,
                 "browser_recaptcha_settle_seconds": 3,
                 "browser_score_test_warmup_seconds": 12,
+                "browser_idle_ttl_seconds": 600,
                 "flow_timeout": 300,
                 "upsample_timeout": 300,
                 "session_ttl_seconds": 1200,
@@ -323,6 +325,19 @@ class Config:
         if value:
             return float(value)
         return float(self._get("captcha", "browser_score_test_warmup_seconds", 12))
+
+    @property
+    def browser_idle_ttl_seconds(self) -> int:
+        value = os.getenv("FCS_BROWSER_IDLE_TTL_SECONDS")
+        if value:
+            try:
+                return max(60, int(value))
+            except Exception:
+                return 600
+        try:
+            return max(60, int(self._get("captcha", "browser_idle_ttl_seconds", 600)))
+        except Exception:
+            return 600
 
     @property
     def flow_timeout(self) -> int:

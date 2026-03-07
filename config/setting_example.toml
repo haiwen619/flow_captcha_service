@@ -17,6 +17,7 @@ browser_launch_background = true
 browser_score_dom_wait_seconds = 25
 browser_recaptcha_settle_seconds = 3
 browser_score_test_warmup_seconds = 12
+browser_idle_ttl_seconds = 600
 flow_timeout = 300
 upsample_timeout = 300
 session_ttl_seconds = 1200
