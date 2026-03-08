@@ -82,6 +82,15 @@ class PortalUserUpdateRequest(BaseModel):
     new_password: Optional[str] = Field(default=None, min_length=6, max_length=120)
 
 
+class PortalUserApiKeyCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class PortalUserApiKeyUpdateRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    enabled: Optional[bool] = None
+
+
 class PortalCdkBatchCreateRequest(BaseModel):
     count: int = Field(default=10, ge=1, le=500)
     quota_times: int = Field(default=1, ge=1, le=100000)

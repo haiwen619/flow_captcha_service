@@ -47,13 +47,27 @@ async def verify_service_api_key(authorization: Optional[str] = Header(default=N
         }
 
     api_key = await _db.resolve_service_api_key(raw_key)
-    if not api_key:
-        raise HTTPException(status_code=401, detail="API Key 无效")
+    if api_key:
+        if not bool(api_key["enabled"]):
+            raise HTTPException(status_code=403, detail="API Key ???")
+        return api_key
 
-    if not bool(api_key["enabled"]):
-        raise HTTPException(status_code=403, detail="API Key 已禁用")
+    portal_api_key = await _db.resolve_portal_user_api_key(raw_key)
+    if not portal_api_key:
+        raise HTTPException(status_code=401, detail="API Key ??")
+    if not bool(portal_api_key.get("enabled", True)):
+        raise HTTPException(status_code=403, detail="API Key ???")
 
-    return api_key
+    user = await _db.get_portal_user(int(portal_api_key.get("portal_user_id") or 0))
+    if not user:
+        raise HTTPException(status_code=401, detail="API Key ???????")
+    if not bool(user.get("enabled", True)):
+        raise HTTPException(status_code=403, detail="?????")
+
+    portal_api_key["portal_user_id"] = int(portal_api_key.get("portal_user_id") or 0)
+    portal_api_key["portal_api_key_id"] = int(portal_api_key.get("id") or 0)
+    portal_api_key["owner_type"] = "portal_user"
+    return portal_api_key
 
 
 def issue_admin_token() -> str:

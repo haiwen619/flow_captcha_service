@@ -44,7 +44,12 @@ async def solve_captcha(
     if _db is None or _runtime is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
 
-    available, message = await _db.ensure_api_key_available(int(api_key.get("id", 0)))
+    portal_user_id = int(api_key.get("portal_user_id") or 0)
+    portal_api_key_id = int(api_key.get("portal_api_key_id") or 0)
+    if portal_user_id > 0:
+        available, message = await _db.ensure_portal_user_available(portal_user_id)
+    else:
+        available, message = await _db.ensure_api_key_available(int(api_key.get("id", 0)))
     if not available:
         raise HTTPException(status_code=403, detail=message)
 
@@ -66,7 +71,18 @@ async def solve_captcha(
             )
             log_status = "success"
 
-        consumed, consume_message = await _db.consume_api_key_quota(int(api_key.get("id", 0)))
+        if portal_user_id > 0:
+            consumed, consume_message = await _db.consume_portal_user_quota(
+                portal_user_id,
+                source_type="api_solve_success",
+                source_ref=str(result.get("session_id") or "") if result else None,
+                note=str(api_key.get("name") or "?? API Key"),
+            )
+            if consumed and portal_api_key_id > 0:
+                await _db.touch_portal_user_api_key_usage(portal_api_key_id)
+        else:
+            consumed, consume_message = await _db.consume_api_key_quota(int(api_key.get("id", 0)))
+
         if not consumed:
             if result and config.cluster_role == "master" and _cluster is not None:
                 try:
@@ -89,6 +105,8 @@ async def solve_captcha(
             status=log_status,
             error_reason=None,
             duration_ms=elapsed,
+            portal_user_id=portal_user_id or None,
+            portal_api_key_id=portal_api_key_id or None,
         )
 
         return SolveResponse(**(result or {}))
@@ -104,6 +122,8 @@ async def solve_captcha(
             status="failed",
             error_reason=str(e),
             duration_ms=elapsed,
+            portal_user_id=portal_user_id or None,
+            portal_api_key_id=portal_api_key_id or None,
         )
         raise HTTPException(status_code=500, detail=f"打码失败: {e}")
 
@@ -139,6 +159,8 @@ async def finish_session(
         status=f"finish:{request.status}",
         error_reason=None,
         duration_ms=None,
+        portal_user_id=int(api_key.get("portal_user_id") or 0) or None,
+        portal_api_key_id=int(api_key.get("portal_api_key_id") or 0) or None,
     )
     return {"success": True, "message": message}
 
@@ -174,6 +196,8 @@ async def report_session_error(
         status="error_reported",
         error_reason=request.error_reason,
         duration_ms=None,
+        portal_user_id=int(api_key.get("portal_user_id") or 0) or None,
+        portal_api_key_id=int(api_key.get("portal_api_key_id") or 0) or None,
     )
     return {"success": True, "message": message}
 

@@ -113,6 +113,40 @@ class Database:
 
             await db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS portal_user_api_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    portal_user_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    key_hash TEXT NOT NULL UNIQUE,
+                    key_prefix TEXT NOT NULL,
+                    enabled BOOLEAN DEFAULT 1,
+                    quota_used INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_used_at TIMESTAMP,
+                    FOREIGN KEY(portal_user_id) REFERENCES portal_users(id)
+                )
+                """
+            )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portal_user_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    portal_user_id INTEGER NOT NULL,
+                    change_amount INTEGER NOT NULL,
+                    balance_after INTEGER NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_ref TEXT,
+                    note TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(portal_user_id) REFERENCES portal_users(id)
+                )
+                """
+            )
+
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS captcha_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT,
@@ -180,6 +214,8 @@ class Database:
             # 历史版本把 node_name 设为 UNIQUE，会导致同名子节点覆盖；这里统一迁移为非唯一。
             await self._migrate_cluster_nodes_schema(db)
             await self._ensure_cluster_nodes_columns(db)
+            await self._add_column_if_missing(db, "captcha_jobs", "portal_user_id", "INTEGER")
+            await self._add_column_if_missing(db, "captcha_jobs", "portal_api_key_id", "INTEGER")
 
             await db.execute(
                 """
@@ -215,8 +251,12 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_users_last_login ON portal_users(last_login_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_cdks_enabled ON portal_cdks(enabled)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_cdks_redeemed_user_id ON portal_cdks(redeemed_user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_api_keys_user_id ON portal_user_api_keys(portal_user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_api_keys_enabled ON portal_user_api_keys(enabled)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_transactions_user_created ON portal_user_transactions(portal_user_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_jobs_user_created ON portal_user_jobs(portal_user_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_jobs_status ON portal_user_jobs(status)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_jobs_portal_user_created ON captcha_jobs(portal_user_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_service_api_keys_enabled ON service_api_keys(enabled)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_enabled ON cluster_nodes(enabled)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_heartbeat ON cluster_nodes(last_heartbeat_at DESC)")
@@ -558,7 +598,22 @@ class Database:
                     (new_enabled, new_display_name, delta, user_id),
                 )
             await db.commit()
-        return await self.get_portal_user(user_id)
+
+        updated = await self.get_portal_user(user_id)
+        if updated is None:
+            return None
+        if delta != 0:
+            await self.create_portal_user_transaction(
+                portal_user_id=user_id,
+                change_amount=delta,
+                balance_after=int(updated.get("quota_remaining") or 0),
+                source_type="admin_adjust",
+                source_ref=str(user_id),
+                note="??????",
+            )
+        if enabled is False:
+            await self.set_portal_user_api_keys_enabled(user_id, False)
+        return updated
 
     async def ensure_portal_user_available(self, user_id: int) -> Tuple[bool, str]:
         user = await self.get_portal_user(user_id)
@@ -570,7 +625,13 @@ class Database:
             return False, "剩余次数不足"
         return True, ""
 
-    async def consume_portal_user_quota(self, user_id: int) -> Tuple[bool, str]:
+    async def consume_portal_user_quota(
+        self,
+        user_id: int,
+        source_type: str = "solve_success",
+        source_ref: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> Tuple[bool, str]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
@@ -599,6 +660,16 @@ class Database:
                     WHERE id = ? AND quota_remaining > 0
                     """,
                     (user_id,),
+                )
+                cursor = await db.execute("SELECT quota_remaining FROM portal_users WHERE id = ?", (user_id,))
+                updated = await cursor.fetchone()
+                balance_after = int(updated["quota_remaining"] or 0) if updated else 0
+                await db.execute(
+                    """
+                    INSERT INTO portal_user_transactions (portal_user_id, change_amount, balance_after, source_type, source_ref, note)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, -1, balance_after, (source_type or "solve_success")[:80], source_ref, note),
                 )
                 await db.commit()
                 return True, ""
@@ -636,25 +707,35 @@ class Database:
     ) -> List[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 200))
         safe_offset = max(0, int(offset))
-        conditions = ["portal_user_id = ?"]
-        params: List[Any] = [portal_user_id]
+        filters: List[str] = []
+        params: List[Any] = [portal_user_id, portal_user_id]
 
         if str(status or "").strip():
-            conditions.append("status = ?")
+            filters.append("status = ?")
+            params.append(str(status).strip())
             params.append(str(status).strip())
         if str(project_id or "").strip():
-            conditions.append("project_id = ?")
+            filters.append("project_id = ?")
+            params.append(str(project_id).strip())
             params.append(str(project_id).strip())
 
+        where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
         params.extend([safe_limit, safe_offset])
-        where_sql = " AND ".join(conditions)
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"""
-                SELECT id, portal_user_id, session_id, project_id, action, status, error_reason, duration_ms, created_at
-                FROM portal_user_jobs
-                WHERE {where_sql}
+                SELECT *
+                FROM (
+                    SELECT id, portal_user_id, session_id, project_id, action, status, error_reason, duration_ms, created_at, 'portal' AS source
+                    FROM portal_user_jobs
+                    WHERE portal_user_id = ?
+                    UNION ALL
+                    SELECT id, portal_user_id, session_id, project_id, action, status, error_reason, duration_ms, created_at, 'api' AS source
+                    FROM captcha_jobs
+                    WHERE portal_user_id = ?
+                ) merged
+                {where_sql}
                 ORDER BY id DESC
                 LIMIT ? OFFSET ?
                 """,
@@ -682,35 +763,46 @@ class Database:
                     SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS recent_7d_total,
                     AVG(CASE WHEN duration_ms IS NOT NULL THEN duration_ms END) AS avg_duration_ms,
                     MAX(created_at) AS last_request_at
-                FROM portal_user_jobs
-                WHERE portal_user_id = ?
+                FROM (
+                    SELECT status, duration_ms, created_at FROM portal_user_jobs WHERE portal_user_id = ?
+                    UNION ALL
+                    SELECT status, duration_ms, created_at FROM captcha_jobs WHERE portal_user_id = ?
+                ) merged
                 """,
-                (user_id,),
+                (user_id, user_id),
             )
             summary = await cursor.fetchone()
 
             cursor = await db.execute(
                 """
                 SELECT project_id, COUNT(*) AS total
-                FROM portal_user_jobs
-                WHERE portal_user_id = ? AND project_id IS NOT NULL AND project_id <> ''
+                FROM (
+                    SELECT project_id FROM portal_user_jobs WHERE portal_user_id = ?
+                    UNION ALL
+                    SELECT project_id FROM captcha_jobs WHERE portal_user_id = ?
+                ) merged
+                WHERE project_id IS NOT NULL AND project_id <> ''
                 GROUP BY project_id
                 ORDER BY total DESC, project_id ASC
                 LIMIT 5
                 """,
-                (user_id,),
+                (user_id, user_id),
             )
             top_projects = [dict(row) for row in await cursor.fetchall()]
 
             cursor = await db.execute(
                 """
                 SELECT session_id
-                FROM portal_user_jobs
-                WHERE portal_user_id = ? AND session_id IS NOT NULL AND session_id <> ''
+                FROM (
+                    SELECT id, session_id FROM portal_user_jobs WHERE portal_user_id = ?
+                    UNION ALL
+                    SELECT id, session_id FROM captcha_jobs WHERE portal_user_id = ?
+                ) merged
+                WHERE session_id IS NOT NULL AND session_id <> ''
                 ORDER BY id DESC
                 LIMIT 1
                 """,
-                (user_id,),
+                (user_id, user_id),
             )
             latest_session = await cursor.fetchone()
 
@@ -867,6 +959,22 @@ class Database:
                     "UPDATE portal_cdks SET redeemed_user_id = ?, redeemed_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (user_id, int(cdk["id"])),
                 )
+                cursor = await db.execute("SELECT quota_remaining FROM portal_users WHERE id = ?", (user_id,))
+                updated_user_balance = await cursor.fetchone()
+                await db.execute(
+                    """
+                    INSERT INTO portal_user_transactions (portal_user_id, change_amount, balance_after, source_type, source_ref, note)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        int(cdk["quota_times"] or 0),
+                        int(updated_user_balance["quota_remaining"] or 0) if updated_user_balance else 0,
+                        "cdk_redeem",
+                        str(cdk["id"]),
+                        str(cdk["code"] or ""),
+                    ),
+                )
                 await db.commit()
             except Exception:
                 await db.execute("ROLLBACK")
@@ -876,6 +984,187 @@ class Database:
         cdks = await self.list_portal_cdks(limit=1000)
         redeemed = next((item for item in cdks if str(item.get("code") or "") == normalized_code), None)
         return True, "兑换成功", {"user": updated_user, "cdk": redeemed}
+
+    async def create_portal_user_transaction(
+        self,
+        portal_user_id: int,
+        change_amount: int,
+        balance_after: int,
+        source_type: str,
+        source_ref: Optional[str] = None,
+        note: Optional[str] = None,
+    ):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO portal_user_transactions (portal_user_id, change_amount, balance_after, source_type, source_ref, note)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (portal_user_id, int(change_amount), int(balance_after), (source_type or "unknown")[:80], source_ref, note),
+            )
+            await db.commit()
+
+    async def list_portal_user_transactions(self, portal_user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, portal_user_id, change_amount, balance_after, source_type, source_ref, note, created_at
+                FROM portal_user_transactions
+                WHERE portal_user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (portal_user_id, safe_limit),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def create_portal_user_api_key(self, portal_user_id: int, name: str) -> Tuple[str, Dict[str, Any]]:
+        raw_key, key_hash, key_prefix = self._generate_service_api_key()
+        normalized_name = str(name or "").strip() or f"key-{portal_user_id}"
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO portal_user_api_keys (portal_user_id, name, key_hash, key_prefix, enabled)
+                VALUES (?, ?, ?, ?, 1)
+                """,
+                (portal_user_id, normalized_name, key_hash, key_prefix),
+            )
+            api_key_id = int(cursor.lastrowid or 0)
+            await db.commit()
+        item = await self.get_portal_user_api_key(api_key_id, portal_user_id=portal_user_id)
+        return raw_key, item or {}
+
+    async def get_portal_user_api_key(self, api_key_id: int, portal_user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            sql = """
+                SELECT id, portal_user_id, name, key_prefix, enabled, quota_used, created_at, updated_at, last_used_at
+                FROM portal_user_api_keys
+                WHERE id = ?
+            """
+            params: List[Any] = [api_key_id]
+            if portal_user_id is not None:
+                sql += " AND portal_user_id = ?"
+                params.append(portal_user_id)
+            cursor = await db.execute(sql, params)
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def list_portal_user_api_keys(self, portal_user_id: int) -> List[Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, portal_user_id, name, key_prefix, enabled, quota_used, created_at, updated_at, last_used_at
+                FROM portal_user_api_keys
+                WHERE portal_user_id = ?
+                ORDER BY id DESC
+                """,
+                (portal_user_id,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def update_portal_user_api_key(
+        self,
+        api_key_id: int,
+        portal_user_id: int,
+        name: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        current = await self.get_portal_user_api_key(api_key_id, portal_user_id=portal_user_id)
+        if not current:
+            return None
+        new_name = str(name or current.get("name") or "").strip() or str(current.get("name") or "")
+        new_enabled = int(bool(enabled)) if enabled is not None else int(bool(current.get("enabled")))
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE portal_user_api_keys
+                SET name = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND portal_user_id = ?
+                """,
+                (new_name, new_enabled, api_key_id, portal_user_id),
+            )
+            await db.commit()
+        return await self.get_portal_user_api_key(api_key_id, portal_user_id=portal_user_id)
+
+    async def set_portal_user_api_keys_enabled(self, portal_user_id: int, enabled: bool):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE portal_user_api_keys SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE portal_user_id = ?",
+                (1 if enabled else 0, portal_user_id),
+            )
+            await db.commit()
+
+    async def resolve_portal_user_api_key(self, raw_key: str) -> Optional[Dict[str, Any]]:
+        key_hash = self._hash_secret(raw_key)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, portal_user_id, name, key_prefix, enabled, quota_used, created_at, updated_at, last_used_at
+                FROM portal_user_api_keys
+                WHERE key_hash = ?
+                """,
+                (key_hash,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def touch_portal_user_api_key_usage(self, api_key_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                UPDATE portal_user_api_keys
+                SET quota_used = quota_used + 1,
+                    last_used_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (api_key_id,),
+            )
+            await db.commit()
+
+    async def list_portal_user_api_call_logs(
+        self,
+        portal_user_id: int,
+        limit: int = 20,
+        offset: int = 0,
+        status: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        safe_offset = max(0, int(offset))
+        conditions = ["j.portal_user_id = ?"]
+        params: List[Any] = [portal_user_id]
+        if str(status or "").strip():
+            conditions.append("j.status = ?")
+            params.append(str(status).strip())
+        if str(project_id or "").strip():
+            conditions.append("j.project_id = ?")
+            params.append(str(project_id).strip())
+        params.extend([safe_limit, safe_offset])
+        where_sql = " AND ".join(conditions)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT j.id, j.session_id, j.project_id, j.action, j.status, j.error_reason, j.duration_ms, j.created_at,
+                       pk.name AS api_key_name, pk.key_prefix AS api_key_prefix
+                FROM captcha_jobs j
+                LEFT JOIN portal_user_api_keys pk ON pk.id = j.portal_api_key_id
+                WHERE {where_sql}
+                ORDER BY j.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def get_captcha_config(self) -> CaptchaConfig:
         async with aiosqlite.connect(self.db_path) as db:
@@ -1089,14 +1378,16 @@ class Database:
         status: str,
         error_reason: Optional[str],
         duration_ms: Optional[int],
+        portal_user_id: Optional[int] = None,
+        portal_api_key_id: Optional[int] = None,
     ):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
-                INSERT INTO captcha_jobs (session_id, api_key_id, project_id, action, status, error_reason, duration_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO captcha_jobs (session_id, api_key_id, project_id, action, status, error_reason, duration_ms, portal_user_id, portal_api_key_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, api_key_id, project_id, action, status, error_reason, duration_ms),
+                (session_id, api_key_id, project_id, action, status, error_reason, duration_ms, portal_user_id, portal_api_key_id),
             )
             await db.commit()
 
@@ -1108,7 +1399,8 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT j.id, j.session_id, j.api_key_id, k.name AS api_key_name, k.key_prefix,
-                       j.project_id, j.action, j.status, j.error_reason, j.duration_ms, j.created_at
+                       j.project_id, j.action, j.status, j.error_reason, j.duration_ms, j.created_at,
+                       j.portal_user_id, j.portal_api_key_id
                 FROM captcha_jobs j
                 LEFT JOIN service_api_keys k ON k.id = j.api_key_id
                 ORDER BY j.id DESC

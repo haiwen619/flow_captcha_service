@@ -21,6 +21,8 @@ from ..core.models import (
     LoginRequest,
     PortalRedeemRequest,
     PortalRegisterRequest,
+    PortalUserApiKeyCreateRequest,
+    PortalUserApiKeyUpdateRequest,
     SolveRequest,
     SolveResponse,
 )
@@ -155,14 +157,18 @@ async def _build_portal_user_workspace_payload(user_id: int) -> Dict[str, Any]:
     if not summary:
         raise HTTPException(status_code=404, detail="用户不存在")
 
-    recent_sessions = await _db.list_portal_user_jobs(portal_user_id=user_id, limit=12, offset=0)
+    recent_sessions = await _db.list_portal_user_api_call_logs(portal_user_id=user_id, limit=20, offset=0)
     recent_redeems = await _db.list_portal_user_cdk_redeems(user_id=user_id, limit=12)
+    recent_transactions = await _db.list_portal_user_transactions(portal_user_id=user_id, limit=20)
+    api_keys = await _db.list_portal_user_api_keys(portal_user_id=user_id)
     return {
         "success": True,
         "user": summary["user"],
         "usage": summary["usage"],
         "recent_sessions": recent_sessions,
         "recent_redeems": recent_redeems,
+        "recent_transactions": recent_transactions,
+        "api_keys": api_keys,
     }
 
 
@@ -333,6 +339,66 @@ async def portal_check_username(username: str = Query(min_length=1, max_length=6
             "created_at": user.get("created_at"),
         },
     }
+
+
+@router.get("/user/api-keys")
+async def list_portal_user_api_keys(user: dict = Depends(verify_portal_user_token)):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="??????")
+    items = await _db.list_portal_user_api_keys(int(user["id"]))
+    return {"success": True, "items": items}
+
+
+@router.post("/user/api-keys")
+async def create_portal_user_api_key(
+    request: PortalUserApiKeyCreateRequest,
+    user: dict = Depends(verify_portal_user_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="??????")
+    raw_key, item = await _db.create_portal_user_api_key(int(user["id"]), request.name)
+    return {"success": True, "api_key": raw_key, "item": item, "message": "??????? API Key??????"}
+
+
+@router.patch("/user/api-keys/{api_key_id}")
+async def update_portal_user_api_key(
+    api_key_id: int,
+    request: PortalUserApiKeyUpdateRequest,
+    user: dict = Depends(verify_portal_user_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="??????")
+    item = await _db.update_portal_user_api_key(
+        api_key_id=api_key_id,
+        portal_user_id=int(user["id"]),
+        name=request.name,
+        enabled=request.enabled,
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="API Key ???")
+    return {"success": True, "item": item}
+
+
+@router.delete("/user/api-keys/{api_key_id}")
+async def soft_delete_portal_user_api_key(api_key_id: int, user: dict = Depends(verify_portal_user_token)):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="??????")
+    item = await _db.update_portal_user_api_key(
+        api_key_id=api_key_id,
+        portal_user_id=int(user["id"]),
+        enabled=False,
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="API Key ???")
+    return {"success": True, "item": item, "message": f"API Key #{api_key_id} ?????????"}
+
+
+@router.get("/user/transactions")
+async def list_portal_user_transactions(user: dict = Depends(verify_portal_user_token)):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="??????")
+    items = await _db.list_portal_user_transactions(int(user["id"]), limit=50)
+    return {"success": True, "items": items}
 
 
 @router.post("/redeem")
