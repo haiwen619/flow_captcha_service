@@ -196,25 +196,33 @@ class CaptchaRuntime:
                     config.session_ttl_seconds,
                     ttl_resolver=self._resolve_entry_ttl,
                 )
-                if not expired_entries:
-                    continue
+                if expired_entries and self._browser_service is not None:
+                    started = time.perf_counter()
+                    for entry in expired_entries:
+                        try:
+                            await self._browser_service.report_error(
+                                entry.browser_id,
+                                error_reason=entry.error_reason or "session_timeout",
+                            )
+                        except Exception as e:
+                            debug_logger.log_warning(f"[CaptchaRuntime] expired session cleanup failed: {e}")
+                    elapsed = int((time.perf_counter() - started) * 1000)
+                    debug_logger.log_info(
+                        f"[CaptchaRuntime] cleaned {len(expired_entries)} expired session(s) in {elapsed}ms"
+                    )
 
-                if self._browser_service is None:
-                    continue
-
-                started = time.perf_counter()
-                for entry in expired_entries:
-                    try:
-                        await self._browser_service.report_error(
-                            entry.browser_id,
-                            error_reason=entry.error_reason or "session_timeout",
-                        )
-                    except Exception as e:
-                        debug_logger.log_warning(f"[CaptchaRuntime] expired session cleanup failed: {e}")
-                elapsed = int((time.perf_counter() - started) * 1000)
-                debug_logger.log_info(
-                    f"[CaptchaRuntime] cleaned {len(expired_entries)} expired session(s) in {elapsed}ms"
+                stale_refunds = await self.db.refund_stale_session_quotas(
+                    stale_seconds=config.session_ttl_seconds,
+                    limit=200,
                 )
+                refund_total = int(stale_refunds.get("portal_refunded", 0)) + int(stale_refunds.get("service_refunded", 0))
+                if refund_total > 0:
+                    debug_logger.log_info(
+                        "[CaptchaRuntime] refunded stale sessions "
+                        f"portal={int(stale_refunds.get('portal_refunded', 0))} "
+                        f"service={int(stale_refunds.get('service_refunded', 0))} "
+                        f"timeout_logs={int(stale_refunds.get('timeout_logs_created', 0))}"
+                    )
             except asyncio.CancelledError:
                 return
             except Exception as e:

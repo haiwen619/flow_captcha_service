@@ -513,6 +513,71 @@
     .toast.ok{background:#15803d}
     .toast.warn{background:#b45309}
     .toast.err{background:#dc2626}
+    .action-row{display:flex;gap:6px;flex-wrap:wrap}
+    .inline-note{margin-top:10px;font-size:12px;color:#64748b;line-height:1.7}
+    .pager{
+      margin-top:12px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .pager-info{font-size:12px;color:#64748b}
+    .pager-actions{display:flex;gap:8px;flex-wrap:wrap}
+    .code-preview{
+      width:100%;
+      min-height:260px;
+      resize:vertical;
+      border:1px solid #cbd5e1;
+      border-radius:12px;
+      padding:12px;
+      background:#f8fafc;
+      color:#0f172a;
+      font-size:12px;
+      line-height:1.6;
+    }
+    .modal-backdrop{
+      position:fixed;
+      inset:0;
+      z-index:1000;
+      display:none;
+      align-items:center;
+      justify-content:center;
+      padding:18px;
+      background:rgba(15,23,42,.5);
+      backdrop-filter:blur(6px);
+    }
+    .modal-backdrop.show{display:flex}
+    .modal-card{
+      width:min(760px,96vw);
+      max-height:min(88vh,920px);
+      overflow:auto;
+      border-radius:18px;
+      border:1px solid rgba(148,163,184,.28);
+      background:#fff;
+      box-shadow:0 22px 48px rgba(15,23,42,.22);
+    }
+    .modal-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      padding:18px 20px 12px;
+      border-bottom:1px solid #e2e8f0;
+      background:linear-gradient(180deg,#f8fbff,#f4f8ff);
+    }
+    .modal-head h3{margin:0;font-size:18px}
+    .modal-head p{margin:8px 0 0;font-size:12px;color:#64748b;line-height:1.7}
+    .modal-body{padding:16px 20px 20px}
+    .modal-meta{
+      margin-bottom:12px;
+      font-size:12px;
+      color:#475569;
+      line-height:1.7;
+      white-space:pre-wrap;
+    }
+    .modal-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
     @keyframes toast-in{from{transform:translateY(10px);opacity:0}to{transform:translateY(0);opacity:1}}
     @media (max-width:1000px){
       .title{font-size:27px}
@@ -531,6 +596,9 @@
       .drawer-grid{grid-template-columns:1fr}
       .cluster-kpis,.cluster-toolbar,.cluster-base{grid-template-columns:1fr}
       .overview-charts{grid-template-columns:1fr}
+      .pager{align-items:stretch}
+      .pager-actions{width:100%}
+      .pager-actions button{flex:1}
       #loginPanel{margin-top:16px}
       .login-hero{padding:16px}
       .login-hero h2{font-size:21px}
@@ -732,9 +800,10 @@
       <div id="pageUsers" class="page">
         <section id="portalUsersPanel" class="panel hidden">
           <h2>终端用户管理</h2>
-          <p class="panel-desc">支持查看用户注册位置、启用状态、剩余次数，并手动增减打码次数。</p>
+          <p class="panel-desc">支持直接修改账号、显示名、密码、剩余次数、已用次数与启用状态。</p>
           <div class="actions"><button id="refreshUsersBtn" class="secondary">刷新用户</button></div>
-          <div class="table-wrap"><table><thead><tr><th>ID</th><th>用户名</th><th>显示名</th><th>注册位置</th><th>启用</th><th>剩余次数</th><th>已用次数</th><th>最后登录</th><th>调次</th><th>操作</th></tr></thead><tbody id="portalUsersTable"></tbody></table></div>
+          <div class="inline-note">密码留空表示不修改。次数按绝对值保存，便于直接修正账号状态。</div>
+          <div class="table-wrap"><table><thead><tr><th>ID</th><th>账号</th><th>显示名</th><th>新密码</th><th>注册位置</th><th>启用</th><th>剩余次数</th><th>已用次数</th><th>最后登录</th><th>操作</th></tr></thead><tbody id="portalUsersTable"></tbody></table></div>
         </section>
       </div>
 
@@ -756,10 +825,37 @@
 
       <div id="pageLogs" class="page">
         <section class="panel">
-          <h2>调用日志（最近 30 条）</h2>
+          <h2>调用日志</h2>
           <div class="actions"><button id="refreshLogsBtn" class="secondary">刷新日志</button></div>
           <div class="table-wrap"><table><thead><tr><th>时间</th><th>会话 ID</th><th>项目 ID</th><th>动作</th><th>状态</th><th>错误原因</th></tr></thead><tbody id="logsTable"></tbody></table></div>
+          <div class="pager">
+            <div id="logsPagerInfo" class="pager-info">第 1 页</div>
+            <div class="pager-actions">
+              <button id="logsPrevBtn" class="secondary" type="button">上一页</button>
+              <button id="logsNextBtn" class="secondary" type="button">下一页</button>
+            </div>
+          </div>
         </section>
+      </div>
+    </div>
+  </div>
+
+  <div id="resultModalBackdrop" class="modal-backdrop">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="resultModalTitle">
+      <div class="modal-head">
+        <div>
+          <h3 id="resultModalTitle">结果详情</h3>
+          <p id="resultModalSubtitle">请立即复制保存。</p>
+        </div>
+        <button id="closeResultModalBtn" class="secondary" type="button">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div id="resultModalMeta" class="modal-meta"></div>
+        <textarea id="resultModalText" class="code-preview mono" readonly></textarea>
+        <div class="modal-actions">
+          <button id="resultModalCopyBtn" type="button">复制内容</button>
+          <button id="resultModalDownloadBtn" class="secondary" type="button">导出 TXT</button>
+        </div>
       </div>
     </div>
   </div>
@@ -789,6 +885,7 @@
   <script>
     (() => {
       const TOKEN_STORAGE_KEY = "fcs_admin_token";
+      const REVEALED_API_KEY_STORAGE_KEY = "fcs_admin_revealed_api_keys";
       const state = {
         token: "",
         role: "unknown",
@@ -796,12 +893,27 @@
         clusterNodes: [],
         clusterSearch: "",
         clusterHealthFilter: "all",
+        logs: {
+          limit: 30,
+          offset: 0,
+          total: 0,
+        },
+        resultModal: {
+          filename: "",
+          text: "",
+        },
+        revealedApiKeys: {},
       };
       const roleTextMap = { master: "主节点（master）", subnode: "子节点（subnode）", standalone: "单机（standalone）", unknown: "未知" };
       const q = (id) => document.getElementById(id);
       const toInt = (v, d) => Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d;
       const toFloat = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
-      const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const esc = (v) => String(v ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
       const pageNames = ["overview", "config", "cluster", "apikeys", "users", "cdks", "logs"];
       const pageElementMap = {
         overview: "pageOverview",
@@ -826,6 +938,92 @@
       };
       const showNotice = (m, kind = "ok") => { const e = q("notice"); e.className = `notice ${kind}`; e.textContent = m; showToast(m, kind); };
       const clearNotice = () => { const e = q("notice"); e.className = "notice"; e.textContent = ""; };
+      const loadRevealedApiKeys = () => {
+        try {
+          const raw = sessionStorage.getItem(REVEALED_API_KEY_STORAGE_KEY);
+          const parsed = raw ? JSON.parse(raw) : {};
+          state.revealedApiKeys = parsed && typeof parsed === "object" ? parsed : {};
+        } catch (_) {
+          state.revealedApiKeys = {};
+        }
+      };
+      const persistRevealedApiKeys = () => {
+        sessionStorage.setItem(REVEALED_API_KEY_STORAGE_KEY, JSON.stringify(state.revealedApiKeys || {}));
+      };
+      const cacheRevealedApiKey = (id, rawKey) => {
+        const normalizedId = String(id || "").trim();
+        const normalizedKey = String(rawKey || "").trim();
+        if (!normalizedId || !normalizedKey) return;
+        state.revealedApiKeys[normalizedId] = normalizedKey;
+        persistRevealedApiKeys();
+      };
+      const getCachedApiKey = (id) => {
+        const normalizedId = String(id || "").trim();
+        if (!normalizedId) return "";
+        return String(state.revealedApiKeys?.[normalizedId] || "");
+      };
+      const copyText = async (text) => {
+        const normalized = String(text || "");
+        if (!normalized) throw new Error("没有可复制的内容");
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(normalized);
+          return;
+        }
+        const textarea = document.createElement("textarea");
+        textarea.value = normalized;
+        textarea.setAttribute("readonly", "readonly");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      };
+      const downloadTextFile = (filename, text) => {
+        const blob = new Blob([String(text || "")], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename || "export.txt";
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      };
+      const closeResultModal = () => {
+        q("resultModalBackdrop").classList.remove("show");
+        state.resultModal = { filename: "", text: "" };
+      };
+      const openResultModal = ({ title, subtitle, meta, text, filename, copyLabel = "复制内容", downloadLabel = "导出 TXT" }) => {
+        state.resultModal = {
+          filename: filename || "export.txt",
+          text: String(text || ""),
+        };
+        q("resultModalTitle").textContent = title || "结果详情";
+        q("resultModalSubtitle").textContent = subtitle || "请立即复制保存。";
+        q("resultModalMeta").textContent = meta || "";
+        q("resultModalText").value = String(text || "");
+        q("resultModalCopyBtn").textContent = copyLabel;
+        q("resultModalDownloadBtn").textContent = downloadLabel;
+        q("resultModalBackdrop").classList.add("show");
+      };
+      const renderLogsPager = () => {
+        const infoEl = q("logsPagerInfo");
+        const prevEl = q("logsPrevBtn");
+        const nextEl = q("logsNextBtn");
+        const limit = Math.max(1, Number(state.logs?.limit || 30));
+        const offset = Math.max(0, Number(state.logs?.offset || 0));
+        const total = Math.max(0, Number(state.logs?.total || 0));
+        const page = Math.floor(offset / limit) + 1;
+        const totalPages = total > 0 ? Math.ceil(total / limit) : 1;
+        const from = total > 0 ? offset + 1 : 0;
+        const to = total > 0 ? Math.min(offset + limit, total) : 0;
+        infoEl.textContent = total > 0
+          ? `第 ${page}/${totalPages} 页，显示 ${from}-${to}，共 ${total} 条`
+          : `第 ${page} 页，暂无更多数据`;
+        prevEl.disabled = offset <= 0;
+        nextEl.disabled = offset + limit >= total && total !== 0;
+      };
       const setEnvNotice = (env = {}) => {
         const keys = Object.keys(env || {});
         const e = q("envNotice");
@@ -869,6 +1067,7 @@
         if (r.status === 401 && state.token) {
           state.token = ""; state.role = "unknown";
           localStorage.removeItem(TOKEN_STORAGE_KEY);
+          closeResultModal();
           closeNodeDetailDrawer();
           q("dashboard").style.display = "none";
           q("loginPanel").classList.remove("hidden");
@@ -1040,21 +1239,39 @@
       };
       const loadClusterConfig = async () => { const r = await req("/api/admin/cluster/config"); fillClusterBase(r || {}); };
       const loadLogs = async () => {
-        const r = await req("/api/admin/logs?limit=30&offset=0");
+        const limit = Math.max(1, Number(state.logs?.limit || 30));
+        const offset = Math.max(0, Number(state.logs?.offset || 0));
+        const r = await req(`/api/admin/logs?limit=${limit}&offset=${offset}`);
+        const items = Array.isArray(r.items) ? r.items : [];
+        const totalCandidate = Number(r.total);
+        const total = Number.isFinite(totalCandidate)
+          ? totalCandidate
+          : (items.length >= limit ? offset + items.length + 1 : offset + items.length);
+        state.logs.limit = Number(r.limit || limit) || limit;
+        state.logs.offset = Number(r.offset || offset) || 0;
+        state.logs.total = Math.max(0, total);
         const b = q("logsTable"); b.innerHTML = "";
-        for (const it of (r.items || [])) {
+        for (const it of items) {
           const tr = document.createElement("tr");
           tr.innerHTML = `<td>${it.created_at || "-"}</td><td>${it.session_id || "-"}</td><td>${it.project_id || "-"}</td><td>${it.action || "-"}</td><td>${it.status || "-"}</td><td>${it.error_reason || ""}</td>`;
           b.appendChild(tr);
         }
+        if (!items.length) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td colspan="6" style="text-align:center;color:#64748b;padding:16px 8px">暂无日志记录</td>`;
+          b.appendChild(tr);
+        }
+        renderLogsPager();
       };
       const loadApiKeys = async () => {
         if (state.role !== "master") return;
         const r = await req("/api/admin/apikeys");
         const b = q("apiKeysTable"); b.innerHTML = "";
         for (const it of (r.items || [])) {
+          const rawKey = getCachedApiKey(it.id);
+          const copyTextLabel = rawKey ? "复制 Key" : "复制前缀";
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${it.id}</td><td><input data-ak-id="${it.id}" data-ak-key="name" value="${it.name || ""}" /></td><td>${it.key_prefix || "-"}</td><td><input type="checkbox" data-ak-id="${it.id}" data-ak-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><input data-ak-id="${it.id}" data-ak-key="quota_remaining" value="${it.quota_remaining ?? ""}" /></td><td>${it.quota_used ?? 0}</td><td><button class="secondary" data-action="save-api-key" data-id="${it.id}">保存</button></td>`;
+          tr.innerHTML = `<td>${it.id}</td><td><input data-ak-id="${it.id}" data-ak-key="name" value="${it.name || ""}" /></td><td>${it.key_prefix || "-"}</td><td><input type="checkbox" data-ak-id="${it.id}" data-ak-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><input data-ak-id="${it.id}" data-ak-key="quota_remaining" value="${it.quota_remaining ?? ""}" /></td><td>${it.quota_used ?? 0}</td><td><div class="action-row"><button class="secondary" data-action="save-api-key" data-id="${it.id}">保存</button><button class="secondary" data-action="copy-api-key" data-id="${it.id}" data-prefix="${esc(it.key_prefix || "")}">${copyTextLabel}</button></div></td>`;
           b.appendChild(tr);
         }
       };
@@ -1064,7 +1281,7 @@
         const b = q("portalUsersTable"); b.innerHTML = "";
         for (const it of (r.items || [])) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${it.id}</td><td>${esc(it.username || "-")}</td><td><input data-user-id="${it.id}" data-user-key="display_name" value="${esc(it.display_name || "")}" /></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${it.quota_remaining ?? 0}</td><td>${it.quota_used ?? 0}</td><td>${it.last_login_at || "-"}</td><td><input data-user-id="${it.id}" data-user-key="quota_remaining_delta" value="0" /></td><td><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button></td>`;
+          tr.innerHTML = `<td>${it.id}</td><td><input data-user-id="${it.id}" data-user-key="username" value="${esc(it.username || "")}" /></td><td><input data-user-id="${it.id}" data-user-key="display_name" value="${esc(it.display_name || "")}" /></td><td><input type="password" data-user-id="${it.id}" data-user-key="new_password" placeholder="留空不修改" /></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><input data-user-id="${it.id}" data-user-key="quota_remaining" value="${it.quota_remaining ?? 0}" /></td><td><input data-user-id="${it.id}" data-user-key="quota_used" value="${it.quota_used ?? 0}" /></td><td>${it.last_login_at || "-"}</td><td><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button></td>`;
           b.appendChild(tr);
         }
       };
@@ -1306,7 +1523,13 @@
         q("dashboard").style.display = "none"; q("loginPanel").classList.remove("hidden"); q("roleBadge").textContent = "当前角色：未登录"; clearNotice();
       });
       q("refreshAllBtn").addEventListener("click", async () => { try { await loadAll(); showNotice("全部数据已刷新。", "ok"); } catch (err) { showNotice(`刷新失败：${err.message}`, "err"); } });
-      q("refreshLogsBtn").addEventListener("click", async () => { try { await loadLogs(); showNotice("日志已刷新。", "ok"); } catch (err) { showNotice(`日志刷新失败：${err.message}`, "err"); } });
+      q("refreshLogsBtn").addEventListener("click", async () => {
+        try {
+          state.logs.offset = 0;
+          await loadLogs();
+          showNotice("日志已刷新。", "ok");
+        } catch (err) { showNotice(`日志刷新失败：${err.message}`, "err"); }
+      });
       q("cfgRole").addEventListener("change", () => applyRoleLayout(roleOfForm()));
       q("dashboardNav").addEventListener("click", (event) => {
         const target = event.target;
@@ -1329,6 +1552,41 @@
       });
       q("closeNodeDetailBtn").addEventListener("click", closeNodeDetailDrawer);
       q("nodeDetailBackdrop").addEventListener("click", closeNodeDetailDrawer);
+      q("closeResultModalBtn").addEventListener("click", closeResultModal);
+      q("resultModalBackdrop").addEventListener("click", (event) => {
+        if (event.target === q("resultModalBackdrop")) closeResultModal();
+      });
+      q("resultModalCopyBtn").addEventListener("click", async () => {
+        try {
+          await copyText(state.resultModal?.text || "");
+          showNotice("内容已复制。", "ok");
+        } catch (err) {
+          showNotice(`复制失败：${err.message}`, "err");
+        }
+      });
+      q("resultModalDownloadBtn").addEventListener("click", () => {
+        downloadTextFile(state.resultModal?.filename || "export.txt", state.resultModal?.text || "");
+        showNotice("文件已导出。", "ok");
+      });
+      q("logsPrevBtn").addEventListener("click", async () => {
+        if (state.logs.offset <= 0) return;
+        state.logs.offset = Math.max(0, state.logs.offset - state.logs.limit);
+        try {
+          await loadLogs();
+        } catch (err) {
+          showNotice(`上一页加载失败：${err.message}`, "err");
+        }
+      });
+      q("logsNextBtn").addEventListener("click", async () => {
+        if (state.logs.total && state.logs.offset + state.logs.limit >= state.logs.total) return;
+        state.logs.offset += state.logs.limit;
+        try {
+          await loadLogs();
+        } catch (err) {
+          state.logs.offset = Math.max(0, state.logs.offset - state.logs.limit);
+          showNotice(`下一页加载失败：${err.message}`, "err");
+        }
+      });
 
       q("saveAdminBtn").addEventListener("click", async () => {
         try {
@@ -1394,9 +1652,19 @@
           if (!name) throw new Error("请填写 Key 名称。");
           const quotaRaw = q("newApiKeyQuota").value.trim();
           const r = await req("/api/admin/apikeys", { method: "POST", body: { name, quota_remaining: quotaRaw === "" ? null : toInt(quotaRaw, 0) } });
-          q("newApiKeyText").textContent = `新 Key（仅显示一次）：${r.api_key || ""}`;
+          cacheRevealedApiKey(r.item?.id, r.api_key || "");
+          q("newApiKeyText").textContent = `API Key #${r.item?.id || "-"} 已生成，可在弹窗中复制。`;
           q("newApiKeyName").value = ""; q("newApiKeyQuota").value = "";
           await loadApiKeys(); await loadSystem();
+          openResultModal({
+            title: "API Key 创建成功",
+            subtitle: "完整 Key 仅本次返回，请立即复制保存。",
+            meta: `名称：${r.item?.name || name}\nID：${r.item?.id || "-"}\n前缀：${r.item?.key_prefix || "-"}`,
+            text: r.api_key || "",
+            filename: `service-api-key-${r.item?.id || "new"}.txt`,
+            copyLabel: "复制完整 Key",
+            downloadLabel: "导出 Key 文件",
+          });
           showNotice("API Key 创建成功。", "ok");
         } catch (err) { showNotice(`创建 API Key 失败：${err.message}`, "err"); }
       });
@@ -1408,8 +1676,18 @@
           const prefix = q("cdkPrefix").value.trim() || "CDK";
           const note = q("cdkNote").value.trim() || null;
           const r = await req("/api/admin/cdks/batch", { method: "POST", body: { count, quota_times: quotaTimes, prefix, note } });
-          q("newCdksText").textContent = (r.items || []).map((it) => `${it.code} (${it.quota_times})`).join("\n");
+          const cdkText = (r.items || []).map((it) => `${it.code || ""}`).join("\n");
+          q("newCdksText").textContent = `已生成 ${(r.items || []).length} 个 CDK，可在弹窗中一键复制或导出。`;
           await loadPortalCdks();
+          openResultModal({
+            title: "CDK 批量生成完成",
+            subtitle: "每行一个 CDK，可直接发放给用户。",
+            meta: `生成数量：${(r.items || []).length}\n每个次数：${quotaTimes}\n前缀：${prefix}${note ? `\n备注：${note}` : ""}`,
+            text: cdkText,
+            filename: `portal-cdks-${Date.now()}.txt`,
+            copyLabel: "复制全部 CDK",
+            downloadLabel: "导出 TXT",
+          });
           showNotice(r.message || "CDK 已生成。", "ok");
         } catch (err) { showNotice(`生成 CDK 失败：${err.message}`, "err"); }
       });
@@ -1426,6 +1704,25 @@
             await req(`/api/admin/apikeys/${id}`, { method: "PATCH", body: { name, enabled, quota_remaining: quotaRaw === "" ? null : toInt(quotaRaw, 0) } });
             await loadApiKeys(); showNotice(`API Key #${id} 已保存。`, "ok");
           } catch (err) { showNotice(`保存 API Key 失败：${err.message}`, "err"); }
+        }
+
+        if (target.dataset.action === "copy-api-key") {
+          const id = Number(target.dataset.id);
+          const rawKey = getCachedApiKey(id);
+          const prefix = String(target.dataset.prefix || "").trim();
+          try {
+            if (rawKey) {
+              await copyText(rawKey);
+              showNotice(`API Key #${id} 已复制。`, "ok");
+            } else if (prefix) {
+              await copyText(prefix);
+              showNotice(`完整 Key 未缓存，已复制前缀 ${prefix}。`, "warn");
+            } else {
+              throw new Error("当前没有可复制的 Key 内容");
+            }
+          } catch (err) {
+            showNotice(`复制 API Key 失败：${err.message}`, "err");
+          }
         }
 
         if (target.dataset.action === "detail-node") {
@@ -1451,15 +1748,21 @@
         if (target.dataset.action === "save-user") {
           const id = Number(target.dataset.id);
           try {
+            const usernameEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="username"]`);
             const displayNameEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="display_name"]`);
+            const passwordEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="new_password"]`);
             const enabledEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="enabled"]`);
-            const deltaEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="quota_remaining_delta"]`);
+            const quotaRemainingEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="quota_remaining"]`);
+            const quotaUsedEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="quota_used"]`);
             await req(`/api/admin/users/${id}`, {
               method: "PATCH",
               body: {
+                username: String(usernameEl?.value || "").trim() || null,
                 display_name: String(displayNameEl?.value || "").trim() || null,
+                new_password: String(passwordEl?.value || "").trim() || null,
                 enabled: !!enabledEl?.checked,
-                quota_remaining_delta: toInt(deltaEl?.value, 0),
+                quota_remaining: toInt(quotaRemainingEl?.value, 0),
+                quota_used: toInt(quotaUsedEl?.value, 0),
               },
             });
             await loadPortalUsers();
@@ -1525,6 +1828,8 @@
           }
         }
       });
+      loadRevealedApiKeys();
+      renderLogsPager();
       tryRestoreLogin();
     })();
   </script>

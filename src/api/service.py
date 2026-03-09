@@ -26,6 +26,30 @@ def set_dependencies(db: Database, runtime: CaptchaRuntime, cluster_manager: Clu
     _cluster = cluster_manager
 
 
+async def _refund_session_quota(api_key: dict, session_id: str, reason: str):
+    if _db is None:
+        return
+
+    portal_user_id = int(api_key.get("portal_user_id") or 0)
+    portal_api_key_id = int(api_key.get("portal_api_key_id") or 0)
+    if portal_user_id > 0:
+        await _db.refund_portal_user_quota(
+            user_id=portal_user_id,
+            session_id=session_id,
+            reason=reason,
+            portal_api_key_id=portal_api_key_id or None,
+        )
+        return
+
+    api_key_id = int(api_key.get("id") or 0)
+    if api_key_id > 0:
+        await _db.refund_api_key_quota(
+            api_key_id=api_key_id,
+            session_id=session_id,
+            reason=reason,
+        )
+
+
 @router.get("/health")
 async def health_check():
     return {
@@ -77,11 +101,13 @@ async def solve_captcha(
                 source_type="api_solve_success",
                 source_ref=str(result.get("session_id") or "") if result else None,
                 note=str(api_key.get("name") or "?? API Key"),
+                portal_api_key_id=portal_api_key_id or None,
             )
-            if consumed and portal_api_key_id > 0:
-                await _db.touch_portal_user_api_key_usage(portal_api_key_id)
         else:
-            consumed, consume_message = await _db.consume_api_key_quota(int(api_key.get("id", 0)))
+            consumed, consume_message = await _db.consume_api_key_quota(
+                int(api_key.get("id", 0)),
+                session_id=str(result.get("session_id") or "") if result else None,
+            )
 
         if not consumed:
             if result and config.cluster_role == "master" and _cluster is not None:
@@ -151,6 +177,14 @@ async def finish_session(
         if not ok:
             raise HTTPException(status_code=404, detail=message)
 
+    normalized_status = str(request.status or "").strip().lower()
+    if normalized_status and normalized_status != "success":
+        await _refund_session_quota(
+            api_key=api_key,
+            session_id=session_id,
+            reason=f"finish:{normalized_status}",
+        )
+
     await _db.create_job_log(
         session_id=session_id,
         api_key_id=int(api_key.get("id", 0)),
@@ -187,6 +221,12 @@ async def report_session_error(
         ok, message, entry = await _runtime.mark_error(session_id, request.error_reason)
         if not ok:
             raise HTTPException(status_code=404, detail=message)
+
+    await _refund_session_quota(
+        api_key=api_key,
+        session_id=session_id,
+        reason=request.error_reason or "error_reported",
+    )
 
     await _db.create_job_log(
         session_id=session_id,

@@ -127,7 +127,7 @@ def _build_quickstart(base_url: str) -> Dict[str, Any]:
             {"name": "用户注册", "method": "POST", "path": "/api/portal/auth/register", "description": "用户自注册，校验注册位置与重复用户名。"},
             {"name": "用户登录", "method": "POST", "path": "/api/portal/auth/login", "description": "登录后拿到 portal token，用户端打码不必暴露管理员数据。"},
             {"name": "兑换 CDK", "method": "POST", "path": "/api/portal/cdks/redeem", "description": "成功兑换后增加可用打码次数。"},
-            {"name": "用户打码", "method": "POST", "path": "/api/portal/user/solve", "description": "打码成功才扣 1 次；失败不扣。"},
+            {"name": "用户打码", "method": "POST", "path": "/api/portal/user/solve", "description": "先校验可用次数；最终生成成功才扣，失败会返还次数。"},
             {"name": "高级 API 调试", "method": "POST", "path": "/api/v1/solve", "description": "高级接入仍支持 API Key 直连模式。"},
         ],
     }
@@ -147,6 +147,21 @@ def _resolve_register_location(request: Request, register_location: str) -> str:
             raise HTTPException(status_code=400, detail="注册位置校验失败")
 
     return normalized_location
+
+
+def _build_pagination(limit: int, offset: int, total: int) -> Dict[str, Any]:
+    safe_limit = max(1, int(limit or 1))
+    safe_offset = max(0, int(offset or 0))
+    safe_total = max(0, int(total or 0))
+    return {
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "total": safe_total,
+        "page": (safe_offset // safe_limit) + 1,
+        "total_pages": max(1, (safe_total + safe_limit - 1) // safe_limit) if safe_total > 0 else 1,
+        "has_prev": safe_offset > 0,
+        "has_next": safe_offset + safe_limit < safe_total,
+    }
 
 
 async def _build_portal_user_workspace_payload(user_id: int) -> Dict[str, Any]:
@@ -189,6 +204,16 @@ async def _cleanup_portal_success_result(result: Optional[Dict[str, Any]]):
             await _runtime.mark_error(session_id, "quota_conflict")
         except Exception:
             pass
+
+
+async def _refund_portal_session_quota(user_id: int, session_id: str, reason: str):
+    if _db is None:
+        return
+    await _db.refund_portal_user_quota(
+        user_id=user_id,
+        session_id=session_id,
+        reason=reason,
+    )
 
 
 @router.get("/overview")
@@ -403,11 +428,21 @@ async def soft_delete_portal_user_api_key(api_key_id: int, user: dict = Depends(
 
 
 @router.get("/user/transactions")
-async def list_portal_user_transactions(user: dict = Depends(verify_portal_user_token)):
+async def list_portal_user_transactions(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: dict = Depends(verify_portal_user_token),
+):
     if _db is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
-    items = await _db.list_portal_user_transactions(int(user["id"]), limit=50)
-    return {"success": True, "items": items}
+    user_id = int(user["id"])
+    items = await _db.list_portal_user_transactions(user_id, limit=limit, offset=offset)
+    total = await _db.count_portal_user_transactions(user_id)
+    return {
+        "success": True,
+        "items": items,
+        **_build_pagination(limit=limit, offset=offset, total=total),
+    }
 
 
 @router.post("/redeem")
@@ -456,12 +491,16 @@ async def list_portal_user_sessions(
         status=status,
         project_id=project_id,
     )
+    total = await _db.count_portal_user_jobs(
+        portal_user_id=int(user["id"]),
+        status=status,
+        project_id=project_id,
+    )
     return {
         "success": True,
         "items": items,
-        "limit": limit,
-        "offset": offset,
         "filters": {"status": status, "project_id": project_id},
+        **_build_pagination(limit=limit, offset=offset, total=total),
     }
 
 
@@ -493,7 +532,12 @@ async def portal_user_solve(request: SolveRequest, user: dict = Depends(verify_p
             )
             log_status = "success"
 
-        consumed, consume_message = await _db.consume_portal_user_quota(user_id)
+        consumed, consume_message = await _db.consume_portal_user_quota(
+            user_id,
+            source_type="solve_success",
+            source_ref=str(result.get("session_id") or "") if result else None,
+            note="portal_user_solve",
+        )
         if not consumed:
             await _cleanup_portal_success_result(result)
             raise HTTPException(status_code=403, detail=consume_message)
@@ -548,6 +592,14 @@ async def portal_user_finish_session(
         if not ok:
             raise HTTPException(status_code=404, detail=message)
 
+    normalized_status = str(request.status or "").strip().lower()
+    if normalized_status and normalized_status != "success":
+        await _refund_portal_session_quota(
+            user_id=int(user["id"]),
+            session_id=session_id,
+            reason=f"finish:{normalized_status}",
+        )
+
     await _db.create_portal_user_job_log(
         portal_user_id=int(user["id"]),
         session_id=session_id,
@@ -582,6 +634,12 @@ async def portal_user_report_error(
         ok, message, entry = await _runtime.mark_error(session_id, request.error_reason)
         if not ok:
             raise HTTPException(status_code=404, detail=message)
+
+    await _refund_portal_session_quota(
+        user_id=int(user["id"]),
+        session_id=session_id,
+        reason=request.error_reason or "error_reported",
+    )
 
     await _db.create_portal_user_job_log(
         portal_user_id=int(user["id"]),

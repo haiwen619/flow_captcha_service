@@ -76,9 +76,12 @@ class PortalRedeemRequest(BaseModel):
 
 
 class PortalUserUpdateRequest(BaseModel):
+    username: Optional[str] = Field(default=None, min_length=3, max_length=60)
     enabled: Optional[bool] = None
     display_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     quota_remaining_delta: Optional[int] = None
+    quota_remaining: Optional[int] = Field(default=None, ge=0)
+    quota_used: Optional[int] = Field(default=None, ge=0)
     new_password: Optional[str] = Field(default=None, min_length=6, max_length=120)
 
 
@@ -93,7 +96,7 @@ class PortalUserApiKeyUpdateRequest(BaseModel):
 
 class PortalCdkBatchCreateRequest(BaseModel):
     count: int = Field(default=10, ge=1, le=500)
-    quota_times: int = Field(default=1, ge=1, le=100000)
+    quota_times: int = Field(default=1, ge=1, le=2147483647)
     prefix: Optional[str] = Field(default="CDK", max_length=20)
     note: Optional[str] = Field(default=None, max_length=200)
 

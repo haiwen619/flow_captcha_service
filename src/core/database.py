@@ -147,6 +147,21 @@ class Database:
 
             await db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS session_quota_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    owner_type TEXT NOT NULL,
+                    owner_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    note TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(session_id, owner_type, owner_id, event_type)
+                )
+                """
+            )
+
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS captcha_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT,
@@ -257,6 +272,7 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_jobs_user_created ON portal_user_jobs(portal_user_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_jobs_status ON portal_user_jobs(status)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_jobs_portal_user_created ON captcha_jobs(portal_user_id, created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_session_quota_events_session ON session_quota_events(session_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_service_api_keys_enabled ON service_api_keys(enabled)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_enabled ON cluster_nodes(enabled)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_heartbeat ON cluster_nodes(last_heartbeat_at DESC)")
@@ -557,18 +573,41 @@ class Database:
     async def update_portal_user(
         self,
         user_id: int,
+        username: Optional[str] = None,
         enabled: Optional[bool] = None,
         display_name: Optional[str] = None,
         quota_remaining_delta: Optional[int] = None,
+        quota_remaining: Optional[int] = None,
+        quota_used: Optional[int] = None,
         new_password: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         current = await self.get_portal_user(user_id)
         if not current:
             return None
 
+        current_username = str(current.get("username") or "").strip()
+        new_username = str(username or current_username).strip()
+        if not new_username:
+            raise ValueError("用户名不能为空")
+        if new_username != current_username:
+            existing_user = await self.get_portal_user_by_username(new_username)
+            if existing_user and int(existing_user.get("id") or 0) != int(user_id):
+                raise ValueError("该账号已存在")
+
         new_enabled = int(bool(enabled)) if enabled is not None else int(bool(current["enabled"]))
-        new_display_name = str(display_name or current.get("display_name") or current.get("username") or "").strip()
-        delta = int(quota_remaining_delta or 0)
+        if display_name is not None:
+            new_display_name = str(display_name or "").strip() or new_username
+        else:
+            new_display_name = str(current.get("display_name") or "").strip() or new_username
+
+        current_quota_remaining = int(current.get("quota_remaining") or 0)
+        if quota_remaining is not None:
+            new_quota_remaining = max(0, int(quota_remaining))
+        else:
+            delta = int(quota_remaining_delta or 0)
+            new_quota_remaining = max(current_quota_remaining + delta, 0)
+        effective_delta = new_quota_remaining - current_quota_remaining
+        new_quota_used = max(0, int(quota_used)) if quota_used is not None else int(current.get("quota_used") or 0)
         new_password_hash = self._hash_secret(new_password) if new_password else None
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -576,40 +615,59 @@ class Database:
                 await db.execute(
                     """
                     UPDATE portal_users
-                    SET enabled = ?,
+                    SET username = ?,
+                        enabled = ?,
                         display_name = ?,
-                        quota_remaining = MAX(COALESCE(quota_remaining, 0) + ?, 0),
+                        quota_remaining = ?,
+                        quota_used = ?,
                         password_hash = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (new_enabled, new_display_name, delta, new_password_hash, user_id),
+                    (
+                        new_username,
+                        new_enabled,
+                        new_display_name,
+                        new_quota_remaining,
+                        new_quota_used,
+                        new_password_hash,
+                        user_id,
+                    ),
                 )
             else:
                 await db.execute(
                     """
                     UPDATE portal_users
-                    SET enabled = ?,
+                    SET username = ?,
+                        enabled = ?,
                         display_name = ?,
-                        quota_remaining = MAX(COALESCE(quota_remaining, 0) + ?, 0),
+                        quota_remaining = ?,
+                        quota_used = ?,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (new_enabled, new_display_name, delta, user_id),
+                    (
+                        new_username,
+                        new_enabled,
+                        new_display_name,
+                        new_quota_remaining,
+                        new_quota_used,
+                        user_id,
+                    ),
                 )
             await db.commit()
 
         updated = await self.get_portal_user(user_id)
         if updated is None:
             return None
-        if delta != 0:
+        if effective_delta != 0:
             await self.create_portal_user_transaction(
                 portal_user_id=user_id,
-                change_amount=delta,
+                change_amount=effective_delta,
                 balance_after=int(updated.get("quota_remaining") or 0),
                 source_type="admin_adjust",
                 source_ref=str(user_id),
-                note="??????",
+                note="管理员调整剩余次数" if quota_remaining is None else "管理员设置剩余次数",
             )
         if enabled is False:
             await self.set_portal_user_api_keys_enabled(user_id, False)
@@ -631,6 +689,7 @@ class Database:
         source_type: str = "solve_success",
         source_ref: Optional[str] = None,
         note: Optional[str] = None,
+        portal_api_key_id: Optional[int] = None,
     ) -> Tuple[bool, str]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -671,8 +730,111 @@ class Database:
                     """,
                     (user_id, -1, balance_after, (source_type or "solve_success")[:80], source_ref, note),
                 )
+                normalized_ref = str(source_ref or "").strip()
+                if normalized_ref:
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
+                        VALUES (?, 'portal_user', ?, 'charge', ?)
+                        """,
+                        (normalized_ref, user_id, (note or "")[:200] or None),
+                    )
+                if portal_api_key_id and int(portal_api_key_id) > 0:
+                    await db.execute(
+                        """
+                        UPDATE portal_user_api_keys
+                        SET quota_used = quota_used + 1,
+                            last_used_at = CURRENT_TIMESTAMP,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (int(portal_api_key_id),),
+                    )
                 await db.commit()
                 return True, ""
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    async def refund_portal_user_quota(
+        self,
+        user_id: int,
+        session_id: str,
+        reason: str,
+        portal_api_key_id: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return False, "session_id 不能为空"
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    """
+                    SELECT id
+                    FROM session_quota_events
+                    WHERE session_id = ? AND owner_type = 'portal_user' AND owner_id = ? AND event_type = 'charge'
+                    LIMIT 1
+                    """,
+                    (normalized_session_id, user_id),
+                )
+                charged = await cursor.fetchone()
+                if not charged:
+                    await db.execute("ROLLBACK")
+                    return False, "未找到可返还的扣次记录"
+
+                cursor = await db.execute(
+                    """
+                    INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
+                    VALUES (?, 'portal_user', ?, 'refund', ?)
+                    """,
+                    (normalized_session_id, user_id, (reason or "")[:200] or None),
+                )
+                if int(cursor.rowcount or 0) <= 0:
+                    await db.commit()
+                    return True, "该会话已返还次数"
+
+                await db.execute(
+                    """
+                    UPDATE portal_users
+                    SET quota_remaining = quota_remaining + 1,
+                        quota_used = MAX(quota_used - 1, 0),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (user_id,),
+                )
+                cursor = await db.execute("SELECT quota_remaining FROM portal_users WHERE id = ?", (user_id,))
+                updated = await cursor.fetchone()
+                balance_after = int(updated["quota_remaining"] or 0) if updated else 0
+                await db.execute(
+                    """
+                    INSERT INTO portal_user_transactions (portal_user_id, change_amount, balance_after, source_type, source_ref, note)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        1,
+                        balance_after,
+                        "generation_refund",
+                        normalized_session_id,
+                        (reason or "生成失败返还次数")[:200],
+                    ),
+                )
+                if portal_api_key_id and int(portal_api_key_id) > 0:
+                    await db.execute(
+                        """
+                        UPDATE portal_user_api_keys
+                        SET quota_used = MAX(quota_used - 1, 0),
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (int(portal_api_key_id),),
+                    )
+                await db.commit()
+                return True, "已返还 1 次"
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
@@ -745,6 +907,279 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def count_portal_user_jobs(
+        self,
+        portal_user_id: int,
+        status: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> int:
+        filters: List[str] = []
+        params: List[Any] = [portal_user_id, portal_user_id]
+
+        if str(status or "").strip():
+            filters.append("status = ?")
+            params.append(str(status).strip())
+        if str(project_id or "").strip():
+            filters.append("project_id = ?")
+            params.append(str(project_id).strip())
+
+        where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT COUNT(*) AS total
+                FROM (
+                    SELECT status, project_id
+                    FROM portal_user_jobs
+                    WHERE portal_user_id = ?
+                    UNION ALL
+                    SELECT status, project_id
+                    FROM captcha_jobs
+                    WHERE portal_user_id = ?
+                ) merged
+                {where_sql}
+                """,
+                params,
+            )
+            row = await cursor.fetchone()
+            return int(row["total"] or 0) if row else 0
+
+    async def refund_stale_session_quotas(
+        self,
+        stale_seconds: int,
+        limit: int = 100,
+    ) -> Dict[str, int]:
+        safe_stale = max(60, int(stale_seconds or 60))
+        safe_limit = max(1, min(int(limit or 100), 500))
+        result = {
+            "portal_refunded": 0,
+            "service_refunded": 0,
+            "timeout_logs_created": 0,
+        }
+
+        terminal_statuses = (
+            "finish:success",
+            "finish:failed",
+            "finish:cancelled",
+            "finish:timeout",
+            "error_reported",
+        )
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            portal_cursor = await db.execute(
+                f"""
+                SELECT
+                    e.session_id,
+                    e.owner_id AS portal_user_id,
+                    CASE
+                        WHEN EXISTS (
+                            SELECT 1
+                            FROM captcha_jobs cj
+                            WHERE cj.portal_user_id = e.owner_id
+                              AND cj.session_id = e.session_id
+                            LIMIT 1
+                        ) THEN 'api'
+                        ELSE 'portal'
+                    END AS source_kind,
+                    COALESCE(
+                        (
+                            SELECT cj.project_id
+                            FROM captcha_jobs cj
+                            WHERE cj.portal_user_id = e.owner_id
+                              AND cj.session_id = e.session_id
+                            ORDER BY cj.id DESC
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT pj.project_id
+                            FROM portal_user_jobs pj
+                            WHERE pj.portal_user_id = e.owner_id
+                              AND pj.session_id = e.session_id
+                            ORDER BY pj.id DESC
+                            LIMIT 1
+                        )
+                    ) AS project_id,
+                    COALESCE(
+                        (
+                            SELECT cj.action
+                            FROM captcha_jobs cj
+                            WHERE cj.portal_user_id = e.owner_id
+                              AND cj.session_id = e.session_id
+                            ORDER BY cj.id DESC
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT pj.action
+                            FROM portal_user_jobs pj
+                            WHERE pj.portal_user_id = e.owner_id
+                              AND pj.session_id = e.session_id
+                            ORDER BY pj.id DESC
+                            LIMIT 1
+                        )
+                    ) AS action,
+                    COALESCE(
+                        (
+                            SELECT cj.api_key_id
+                            FROM captcha_jobs cj
+                            WHERE cj.portal_user_id = e.owner_id
+                              AND cj.session_id = e.session_id
+                            ORDER BY cj.id DESC
+                            LIMIT 1
+                        ),
+                        0
+                    ) AS api_key_id,
+                    COALESCE(
+                        (
+                            SELECT cj.portal_api_key_id
+                            FROM captcha_jobs cj
+                            WHERE cj.portal_user_id = e.owner_id
+                              AND cj.session_id = e.session_id
+                            ORDER BY cj.id DESC
+                            LIMIT 1
+                        ),
+                        0
+                    ) AS portal_api_key_id
+                FROM session_quota_events e
+                WHERE e.owner_type = 'portal_user'
+                  AND e.event_type = 'charge'
+                  AND e.created_at < datetime('now', '-' || ? || ' seconds')
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM session_quota_events r
+                    WHERE r.session_id = e.session_id
+                      AND r.owner_type = e.owner_type
+                      AND r.owner_id = e.owner_id
+                      AND r.event_type = 'refund'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM portal_user_jobs pj
+                    WHERE pj.portal_user_id = e.owner_id
+                      AND pj.session_id = e.session_id
+                      AND pj.status IN ({",".join(["?"] * len(terminal_statuses))})
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM captcha_jobs cj
+                    WHERE cj.portal_user_id = e.owner_id
+                      AND cj.session_id = e.session_id
+                      AND cj.status IN ({",".join(["?"] * len(terminal_statuses))})
+                  )
+                ORDER BY e.id ASC
+                LIMIT ?
+                """,
+                (safe_stale, *terminal_statuses, *terminal_statuses, safe_limit),
+            )
+            portal_candidates = [dict(row) for row in await portal_cursor.fetchall()]
+
+            service_cursor = await db.execute(
+                f"""
+                SELECT
+                    e.session_id,
+                    e.owner_id AS api_key_id,
+                    (
+                        SELECT cj.project_id
+                        FROM captcha_jobs cj
+                        WHERE cj.api_key_id = e.owner_id
+                          AND cj.session_id = e.session_id
+                        ORDER BY cj.id DESC
+                        LIMIT 1
+                    ) AS project_id,
+                    (
+                        SELECT cj.action
+                        FROM captcha_jobs cj
+                        WHERE cj.api_key_id = e.owner_id
+                          AND cj.session_id = e.session_id
+                        ORDER BY cj.id DESC
+                        LIMIT 1
+                    ) AS action
+                FROM session_quota_events e
+                WHERE e.owner_type = 'service_api_key'
+                  AND e.event_type = 'charge'
+                  AND e.created_at < datetime('now', '-' || ? || ' seconds')
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM session_quota_events r
+                    WHERE r.session_id = e.session_id
+                      AND r.owner_type = e.owner_type
+                      AND r.owner_id = e.owner_id
+                      AND r.event_type = 'refund'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM captcha_jobs cj
+                    WHERE cj.api_key_id = e.owner_id
+                      AND cj.session_id = e.session_id
+                      AND cj.status IN ({",".join(["?"] * len(terminal_statuses))})
+                  )
+                ORDER BY e.id ASC
+                LIMIT ?
+                """,
+                (safe_stale, *terminal_statuses, safe_limit),
+            )
+            service_candidates = [dict(row) for row in await service_cursor.fetchall()]
+
+        for item in portal_candidates:
+            refunded, message = await self.refund_portal_user_quota(
+                user_id=int(item["portal_user_id"]),
+                session_id=str(item["session_id"] or ""),
+                reason="session_timeout",
+                portal_api_key_id=int(item.get("portal_api_key_id") or 0) or None,
+            )
+            if not refunded or message != "已返还 1 次":
+                continue
+
+            result["portal_refunded"] += 1
+            if str(item.get("source_kind") or "portal") == "api":
+                await self.create_job_log(
+                    session_id=str(item.get("session_id") or "") or None,
+                    api_key_id=int(item.get("api_key_id") or 0),
+                    project_id=item.get("project_id"),
+                    action=item.get("action"),
+                    status="finish:timeout",
+                    error_reason="session_timeout",
+                    duration_ms=None,
+                    portal_user_id=int(item["portal_user_id"]),
+                    portal_api_key_id=int(item.get("portal_api_key_id") or 0) or None,
+                )
+            else:
+                await self.create_portal_user_job_log(
+                    portal_user_id=int(item["portal_user_id"]),
+                    session_id=str(item.get("session_id") or "") or None,
+                    project_id=item.get("project_id"),
+                    action=item.get("action"),
+                    status="finish:timeout",
+                    error_reason="session_timeout",
+                    duration_ms=None,
+                )
+            result["timeout_logs_created"] += 1
+
+        for item in service_candidates:
+            refunded, message = await self.refund_api_key_quota(
+                api_key_id=int(item["api_key_id"]),
+                session_id=str(item["session_id"] or ""),
+                reason="session_timeout",
+            )
+            if not refunded or message != "已返还 1 次":
+                continue
+
+            result["service_refunded"] += 1
+            await self.create_job_log(
+                session_id=str(item.get("session_id") or "") or None,
+                api_key_id=int(item["api_key_id"]),
+                project_id=item.get("project_id"),
+                action=item.get("action"),
+                status="finish:timeout",
+                error_reason="session_timeout",
+                duration_ms=None,
+            )
+            result["timeout_logs_created"] += 1
+
+        return result
+
     async def get_portal_user_usage_summary(self, user_id: int) -> Optional[Dict[str, Any]]:
         user = await self.get_portal_user(user_id)
         if not user:
@@ -755,9 +1190,9 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT
-                    COUNT(*) AS request_total,
-                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch') THEN 1 ELSE 0 END) AS solve_success_total,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS solve_failed_total,
+                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch', 'failed') THEN 1 ELSE 0 END) AS request_total,
+                    SUM(CASE WHEN status = 'finish:success' THEN 1 ELSE 0 END) AS solve_success_total,
+                    SUM(CASE WHEN status IN ('failed', 'error_reported', 'finish:failed', 'finish:cancelled', 'finish:timeout') THEN 1 ELSE 0 END) AS solve_failed_total,
                     SUM(CASE WHEN status LIKE 'finish:%' THEN 1 ELSE 0 END) AS finish_total,
                     SUM(CASE WHEN status = 'error_reported' THEN 1 ELSE 0 END) AS error_total,
                     SUM(CASE WHEN created_at >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS recent_24h_total,
@@ -778,9 +1213,13 @@ class Database:
                 """
                 SELECT project_id, COUNT(*) AS total
                 FROM (
-                    SELECT project_id FROM portal_user_jobs WHERE portal_user_id = ?
+                    SELECT project_id
+                    FROM portal_user_jobs
+                    WHERE portal_user_id = ? AND status IN ('success', 'success_master_dispatch', 'failed')
                     UNION ALL
-                    SELECT project_id FROM captcha_jobs WHERE portal_user_id = ?
+                    SELECT project_id
+                    FROM captcha_jobs
+                    WHERE portal_user_id = ? AND status IN ('success', 'success_master_dispatch', 'failed')
                 ) merged
                 WHERE project_id IS NOT NULL AND project_id <> ''
                 GROUP BY project_id
@@ -1005,8 +1444,28 @@ class Database:
             )
             await db.commit()
 
-    async def list_portal_user_transactions(self, portal_user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+    async def count_portal_user_transactions(self, portal_user_id: int) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM portal_user_transactions
+                WHERE portal_user_id = ?
+                """,
+                (portal_user_id,),
+            )
+            row = await cursor.fetchone()
+            return int(row["total"] or 0) if row else 0
+
+    async def list_portal_user_transactions(
+        self,
+        portal_user_id: int,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 200))
+        safe_offset = max(0, int(offset))
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
@@ -1015,9 +1474,9 @@ class Database:
                 FROM portal_user_transactions
                 WHERE portal_user_id = ?
                 ORDER BY id DESC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (portal_user_id, safe_limit),
+                (portal_user_id, safe_limit, safe_offset),
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
@@ -1115,20 +1574,6 @@ class Database:
             )
             row = await cursor.fetchone()
             return dict(row) if row else None
-
-    async def touch_portal_user_api_key_usage(self, api_key_id: int):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                UPDATE portal_user_api_keys
-                SET quota_used = quota_used + 1,
-                    last_used_at = CURRENT_TIMESTAMP,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                """,
-                (api_key_id,),
-            )
-            await db.commit()
 
     async def list_portal_user_api_call_logs(
         self,
@@ -1316,7 +1761,7 @@ class Database:
 
         return True, ""
 
-    async def consume_api_key_quota(self, api_key_id: int) -> Tuple[bool, str]:
+    async def consume_api_key_quota(self, api_key_id: int, session_id: Optional[str] = None) -> Tuple[bool, str]:
         if api_key_id <= 0:
             return True, ""
 
@@ -1364,8 +1809,77 @@ class Database:
                         """,
                         (api_key_id,),
                     )
+                normalized_session_id = str(session_id or "").strip()
+                if normalized_session_id:
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type)
+                        VALUES (?, 'service_api_key', ?, 'charge')
+                        """,
+                        (normalized_session_id, api_key_id),
+                    )
                 await db.commit()
                 return True, ""
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    async def refund_api_key_quota(
+        self,
+        api_key_id: int,
+        session_id: str,
+        reason: str,
+    ) -> Tuple[bool, str]:
+        normalized_session_id = str(session_id or "").strip()
+        if api_key_id <= 0:
+            return False, "API Key 无效"
+        if not normalized_session_id:
+            return False, "session_id 不能为空"
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    """
+                    SELECT id
+                    FROM session_quota_events
+                    WHERE session_id = ? AND owner_type = 'service_api_key' AND owner_id = ? AND event_type = 'charge'
+                    LIMIT 1
+                    """,
+                    (normalized_session_id, api_key_id),
+                )
+                charged = await cursor.fetchone()
+                if not charged:
+                    await db.execute("ROLLBACK")
+                    return False, "未找到可返还的扣次记录"
+
+                cursor = await db.execute(
+                    """
+                    INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
+                    VALUES (?, 'service_api_key', ?, 'refund', ?)
+                    """,
+                    (normalized_session_id, api_key_id, (reason or "")[:200] or None),
+                )
+                if int(cursor.rowcount or 0) <= 0:
+                    await db.commit()
+                    return True, "该会话已返还次数"
+
+                await db.execute(
+                    """
+                    UPDATE service_api_keys
+                    SET quota_remaining = CASE
+                            WHEN quota_remaining IS NULL THEN NULL
+                            ELSE quota_remaining + 1
+                        END,
+                        quota_used = MAX(quota_used - 1, 0),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (api_key_id,),
+                )
+                await db.commit()
+                return True, "已返还 1 次"
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
@@ -1411,6 +1925,13 @@ class Database:
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def count_job_logs(self) -> int:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT COUNT(*) AS total FROM captcha_jobs")
+            row = await cursor.fetchone()
+            return int(row["total"] or 0) if row else 0
 
 
     async def list_job_logs_by_api_key(
@@ -1469,9 +1990,9 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT
-                    COUNT(*) AS request_total,
-                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch') THEN 1 ELSE 0 END) AS solve_success_total,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS solve_failed_total,
+                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch', 'failed') THEN 1 ELSE 0 END) AS request_total,
+                    SUM(CASE WHEN status = 'finish:success' THEN 1 ELSE 0 END) AS solve_success_total,
+                    SUM(CASE WHEN status IN ('failed', 'error_reported', 'finish:failed', 'finish:cancelled', 'finish:timeout') THEN 1 ELSE 0 END) AS solve_failed_total,
                     SUM(CASE WHEN status LIKE 'finish:%' THEN 1 ELSE 0 END) AS finish_total,
                     SUM(CASE WHEN status = 'error_reported' THEN 1 ELSE 0 END) AS error_total,
                     SUM(CASE WHEN created_at >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS recent_24h_total,
@@ -1501,11 +2022,14 @@ class Database:
                 """
                 SELECT project_id,
                        COUNT(*) AS total,
-                       SUM(CASE WHEN status IN ('success', 'success_master_dispatch') THEN 1 ELSE 0 END) AS solve_success,
-                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS solve_failed,
+                       SUM(CASE WHEN status = 'finish:success' THEN 1 ELSE 0 END) AS solve_success,
+                       SUM(CASE WHEN status IN ('failed', 'error_reported', 'finish:failed', 'finish:cancelled', 'finish:timeout') THEN 1 ELSE 0 END) AS solve_failed,
                        MAX(created_at) AS last_used_at
                 FROM captcha_jobs
-                WHERE api_key_id = ? AND project_id IS NOT NULL AND project_id <> ''
+                WHERE api_key_id = ?
+                  AND project_id IS NOT NULL
+                  AND project_id <> ''
+                  AND status IN ('success', 'success_master_dispatch', 'failed')
                 GROUP BY project_id
                 ORDER BY total DESC, project_id ASC
                 LIMIT 5
@@ -1519,7 +2043,10 @@ class Database:
                 SELECT action,
                        COUNT(*) AS total
                 FROM captcha_jobs
-                WHERE api_key_id = ? AND action IS NOT NULL AND action <> ''
+                WHERE api_key_id = ?
+                  AND action IS NOT NULL
+                  AND action <> ''
+                  AND status IN ('success', 'success_master_dispatch', 'failed')
                 GROUP BY action
                 ORDER BY total DESC, action ASC
                 LIMIT 5
@@ -1559,9 +2086,9 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch') THEN 1 ELSE 0 END) AS success,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch', 'failed') THEN 1 ELSE 0 END) AS total,
+                    SUM(CASE WHEN status = 'finish:success' THEN 1 ELSE 0 END) AS success,
+                    SUM(CASE WHEN status IN ('failed', 'error_reported', 'finish:failed', 'finish:cancelled', 'finish:timeout') THEN 1 ELSE 0 END) AS failed,
                     SUM(CASE WHEN status LIKE 'finish:%' THEN 1 ELSE 0 END) AS finish_total,
                     SUM(CASE WHEN status = 'error_reported' THEN 1 ELSE 0 END) AS error_report_total
                 FROM captcha_jobs

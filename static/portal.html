@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -9,47 +9,14 @@
 <body>
   <main class="portal-shell">
     <section id="guestView" class="guest-home">
-      <header class="marketing-header">
-        <div class="marketing-brand">
-          <span class="brand-chip solid">flow captcha</span>
-          <div>
-            <strong>商业化验证码能力平台</strong>
-            <p>面向开发者与业务系统的托管式接入门户</p>
-          </div>
-        </div>
-        <nav class="marketing-nav">
-          <a href="#features">功能</a>
-          <a href="#pricing">定价</a>
-          <a href="#docs">接入文档</a>
-          <a href="#faq">常见问题</a>
-        </nav>
-        <div class="marketing-cta">
-          <button id="heroLoginBtn" class="btn ghost" type="button">登录</button>
-          <button id="heroRegisterBtn" class="btn primary" type="button">注册</button>
-        </div>
-      </header>
-
-      <section class="marketing-hero">
-        <div class="marketing-copy">
-          <span class="section-eyebrow">商用入口</span>
-          <h1>面向业务接入的验证码能力控制台</h1>
-          <p class="hero-text">
-            统一完成用户注册、API Key 申请、次数充值、调用记录查询与账号管理。
-            不再向用户暴露内部节点、调试面板和运维信息。
-          </p>
-          <div class="hero-points">
-            <div class="hero-point">注册后即可进入控制台</div>
-            <div class="hero-point">支持 CDK 充值与次数管理</div>
-            <div class="hero-point">支持用户自助申请 API Key</div>
-            <div class="hero-point">调用成功才扣次，失败不扣次</div>
-          </div>
+      <div class="guest-auth-shell">
+        <div class="guest-auth-intro">
+          <span class="brand-chip solid">用户中心</span>
+          <h1>登录或注册</h1>
+          <p class="auth-desc">首页只保留账号入口。登录后再查看 API Key、次数明细和调用记录。</p>
         </div>
 
         <div id="guestAuthCard" class="auth-card">
-          <div class="brand-chip">用户中心</div>
-          <h2>登录或注册</h2>
-          <p class="auth-desc">登录后可查看剩余次数、申请 API Key、兑换 CDK、浏览自己的调用记录。</p>
-
           <div class="auth-tabs">
             <button id="tabLoginBtn" class="auth-tab active" type="button" data-auth-tab="login">登录</button>
             <button id="tabRegisterBtn" class="auth-tab" type="button" data-auth-tab="register">注册</button>
@@ -87,117 +54,7 @@
             </form>
           </section>
         </div>
-      </section>
-
-      <section id="features" class="marketing-section">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">功能</div>
-            <h2>商用接入需要的核心能力</h2>
-          </div>
-        </div>
-        <div class="feature-grid">
-          <article class="feature-card">
-            <h3>用户账号体系</h3>
-            <p>支持用户自注册、登录、账号信息查看与软删除后恢复。</p>
-          </article>
-          <article class="feature-card">
-            <h3>API Key 自助申请</h3>
-            <p>用户登录后可自行创建、禁用、软删除自己的 API Key。</p>
-          </article>
-          <article class="feature-card">
-            <h3>CDK 充值</h3>
-            <p>通过兑换码为账号充值次数，自动形成可审计的消费记录。</p>
-          </article>
-          <article class="feature-card">
-            <h3>调用记录</h3>
-            <p>只展示当前用户自己的调用记录，不泄露平台内部信息。</p>
-          </article>
-          <article class="feature-card">
-            <h3>次数控制</h3>
-            <p>成功调用才扣次，失败不扣次，规则清晰、适合商用。</p>
-          </article>
-          <article class="feature-card">
-            <h3>开发者控制台</h3>
-            <p>登录后通过顶部导航切换概览、Key、充值、记录和账号页。</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="pricing" class="marketing-section">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">定价</div>
-            <h2>适合商用落地的套餐模型</h2>
-          </div>
-        </div>
-        <div class="pricing-grid">
-          <article class="pricing-card">
-            <span class="pricing-label">试用版</span>
-            <h3>面向接入测试</h3>
-            <strong>按 CDK 充值</strong>
-            <p>适合先接入、先验证，再逐步扩容。</p>
-          </article>
-          <article class="pricing-card featured">
-            <span class="pricing-label">标准版</span>
-            <h3>适合稳定业务</h3>
-            <strong>月度次数包</strong>
-            <p>支持多个 API Key、消费记录、后台补偿和运营活动批次。</p>
-          </article>
-          <article class="pricing-card">
-            <span class="pricing-label">企业版</span>
-            <h3>适合多项目场景</h3>
-            <strong>定制套餐</strong>
-            <p>可进一步扩展项目管理、审计、渠道与支付能力。</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="docs" class="marketing-section">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">文档</div>
-            <h2>接入流程</h2>
-          </div>
-        </div>
-        <div class="docs-grid">
-          <article class="content-card">
-            <h3>第一步：注册并登录</h3>
-            <p>创建账号后进入控制台，查看剩余次数和账号状态。</p>
-          </article>
-          <article class="content-card">
-            <h3>第二步：申请 API Key</h3>
-            <p>在控制台生成自己的 API Key，完整 Key 只显示一次。</p>
-          </article>
-          <article class="content-card">
-            <h3>第三步：充值与调用</h3>
-            <p>使用 CDK 充值后，即可通过 API Key 正式调用平台能力。</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="faq" class="marketing-section">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">FAQ</div>
-            <h2>常见问题</h2>
-          </div>
-        </div>
-        <div class="faq-list">
-          <article class="content-card">
-            <h3>失败会扣次吗？</h3>
-            <p>不会。当前规则是成功调用才扣减 1 次，失败不扣次。</p>
-          </article>
-          <article class="content-card">
-            <h3>可以自己申请 API Key 吗？</h3>
-            <p>可以。登录后在控制台的 API Key 页面自助申请。</p>
-          </article>
-          <article class="content-card">
-            <h3>可以看到平台内部节点信息吗？</h3>
-            <p>不可以。商用用户只看到自己相关的信息，不显示内部运维内容。</p>
-          </article>
-        </div>
-      </section>
+      </div>
     </section>
 
     <section id="appView" class="app-screen hidden-block">
@@ -249,7 +106,7 @@
 
         <div class="info-band">
           <span class="tag">扣次规则</span>
-          <span id="usageRuleText">成功 solve 才扣减 1 次，失败不扣次。</span>
+          <span id="usageRuleText">最终生成成功才扣减 1 次；失败、取消或报错会返还次数。</span>
         </div>
 
         <section class="content-card">
@@ -285,12 +142,7 @@
             </label>
             <button class="btn primary" type="submit">申请 API Key</button>
           </form>
-          <div id="apiKeyNotice" class="notice info">用户可自助申请自己的 API Key，完整 Key 只会显示一次。</div>
-          <div id="newApiKeyCard" class="redeem-summary hidden-block">
-            <div class="summary-item"><span>新 Key</span><strong id="newApiKeyValue">--</strong></div>
-            <div class="summary-item"><span>名称</span><strong id="newApiKeyLabel">--</strong></div>
-            <div class="summary-item"><span>说明</span><strong>请立即复制保存</strong></div>
-          </div>
+          <div id="apiKeyNotice" class="notice info">用户可自助申请自己的 API Key。完整 Key 只在创建时返回，本页缓存后可再次复制。</div>
         </div>
 
         <div class="table-wrap content-card">
@@ -349,6 +201,9 @@
               <div class="section-eyebrow">消费记录</div>
               <h2>次数变化明细</h2>
             </div>
+            <div class="inline-actions">
+              <button id="copyTransactionsBtn" class="btn subtle" type="button">复制当前页</button>
+            </div>
           </div>
           <div class="table-wrap">
             <table>
@@ -359,6 +214,13 @@
                 <tr><td colspan="5" class="empty-cell">暂无消费记录。</td></tr>
               </tbody>
             </table>
+          </div>
+          <div class="pager">
+            <div id="transactionsPagerInfo" class="pager-info">暂无消费记录。</div>
+            <div class="pager-actions">
+              <button id="transactionsPrevBtn" class="btn ghost mini-btn" type="button">上一页</button>
+              <button id="transactionsNextBtn" class="btn ghost mini-btn" type="button">下一页</button>
+            </div>
           </div>
         </section>
       </section>
@@ -387,6 +249,13 @@
             </tbody>
           </table>
         </div>
+        <div class="pager">
+          <div id="logsPagerInfo" class="pager-info">暂无日志记录。</div>
+          <div class="pager-actions">
+            <button id="logsPrevBtn" class="btn ghost mini-btn" type="button">上一页</button>
+            <button id="logsNextBtn" class="btn ghost mini-btn" type="button">下一页</button>
+          </div>
+        </div>
       </section>
 
       <section id="pageAccount" class="page">
@@ -408,6 +277,29 @@
       </section>
     </section>
   </main>
+
+  <div id="apiKeyModal" class="modal-backdrop hidden-block" aria-hidden="true">
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="apiKeyModalTitle">
+      <div class="modal-head">
+        <div>
+          <div class="section-eyebrow">API Key</div>
+          <h2 id="apiKeyModalTitle">完整 Key</h2>
+        </div>
+        <button id="apiKeyModalCloseBtn" class="btn ghost mini-btn" type="button">关闭</button>
+      </div>
+      <div class="modal-body">
+        <p id="apiKeyModalHint" class="modal-desc">完整 Key 只在创建时返回，本次浏览器会话内可再次复制。</p>
+        <div class="summary-item">
+          <span>名称</span>
+          <strong id="apiKeyModalName">--</strong>
+        </div>
+        <div class="secret-box" id="apiKeyModalValue">--</div>
+      </div>
+      <div class="modal-actions">
+        <button id="apiKeyModalCopyBtn" class="btn primary" type="button">复制完整 Key</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/portal.js"></script>
 </body>

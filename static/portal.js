@@ -1,8 +1,34 @@
-﻿const state = {
+const REVEALED_API_KEY_STORAGE_KEY = "fcs_portal_revealed_api_keys";
+const DEFAULT_PAGE_LIMIT = 20;
+
+const state = {
   summary: null,
   user: null,
   workspace: null,
   page: "dashboard",
+  revealedApiKeys: {},
+  apiKeyModal: {
+    name: "",
+    value: "",
+  },
+  transactions: {
+    items: [],
+    limit: DEFAULT_PAGE_LIMIT,
+    offset: 0,
+    total: 0,
+    has_prev: false,
+    has_next: false,
+    loaded: false,
+  },
+  logs: {
+    items: [],
+    limit: DEFAULT_PAGE_LIMIT,
+    offset: 0,
+    total: 0,
+    has_prev: false,
+    has_next: false,
+    loaded: false,
+  },
 };
 
 const dom = {
@@ -53,20 +79,102 @@ function escapeHtml(value) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;")
+    .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 }
 
 function statusClass(status) {
   const text = String(status || "").toLowerCase();
-  if (text.includes("success")) return "success";
-  if (text.includes("fail") || text.includes("error")) return "error";
-  if (text.includes("cancel") || text.includes("timeout")) return "warning";
+  if (text.includes("success")) {
+    return "success";
+  }
+  if (text.includes("fail") || text.includes("error")) {
+    return "error";
+  }
+  if (text.includes("cancel") || text.includes("timeout")) {
+    return "warning";
+  }
   return "info";
 }
 
 function isAuthenticated() {
   return !!state.user;
+}
+
+function resetTransactionsState() {
+  state.transactions = {
+    items: [],
+    limit: DEFAULT_PAGE_LIMIT,
+    offset: 0,
+    total: 0,
+    has_prev: false,
+    has_next: false,
+    loaded: false,
+  };
+}
+
+function resetLogsState() {
+  state.logs = {
+    items: [],
+    limit: DEFAULT_PAGE_LIMIT,
+    offset: 0,
+    total: 0,
+    has_prev: false,
+    has_next: false,
+    loaded: false,
+  };
+}
+
+function loadRevealedApiKeys() {
+  try {
+    const raw = sessionStorage.getItem(REVEALED_API_KEY_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    state.revealedApiKeys = parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    state.revealedApiKeys = {};
+  }
+}
+
+function persistRevealedApiKeys() {
+  sessionStorage.setItem(REVEALED_API_KEY_STORAGE_KEY, JSON.stringify(state.revealedApiKeys || {}));
+}
+
+function cacheRevealedApiKey(id, rawKey) {
+  const normalizedId = String(id || "").trim();
+  const normalizedKey = String(rawKey || "").trim();
+  if (!normalizedId || !normalizedKey) {
+    return;
+  }
+  state.revealedApiKeys[normalizedId] = normalizedKey;
+  persistRevealedApiKeys();
+}
+
+function getCachedApiKey(id) {
+  const normalizedId = String(id || "").trim();
+  if (!normalizedId) {
+    return "";
+  }
+  return String(state.revealedApiKeys?.[normalizedId] || "");
+}
+
+async function copyText(text) {
+  const normalized = String(text || "");
+  if (!normalized) {
+    throw new Error("没有可复制的内容");
+  }
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(normalized);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = normalized;
+  textarea.setAttribute("readonly", "readonly");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
 }
 
 async function requestJson(url, options = {}) {
@@ -111,6 +219,33 @@ function renderAuthTab(tab) {
   dom.byId("registerPane")?.classList.toggle("active", tab === "register");
 }
 
+function closeApiKeyModal() {
+  const modal = dom.byId("apiKeyModal");
+  if (!modal) {
+    return;
+  }
+  document.body.classList.remove("modal-open");
+  modal.classList.add("hidden-block");
+  modal.classList.remove("show");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function openApiKeyModal(name, value) {
+  state.apiKeyModal.name = String(name || "--");
+  state.apiKeyModal.value = String(value || "");
+  setText("apiKeyModalName", state.apiKeyModal.name);
+  setText("apiKeyModalValue", state.apiKeyModal.value || "--");
+
+  const modal = dom.byId("apiKeyModal");
+  if (!modal) {
+    return;
+  }
+  document.body.classList.add("modal-open");
+  modal.classList.remove("hidden-block");
+  modal.classList.add("show");
+  modal.setAttribute("aria-hidden", "false");
+}
+
 function switchPage(page) {
   state.page = page;
   document.querySelectorAll(".nav-btn").forEach((button) => {
@@ -122,8 +257,13 @@ function switchPage(page) {
 }
 
 function renderShell() {
-  showBlock("guestView", !isAuthenticated());
-  showBlock("appView", isAuthenticated());
+  const authenticated = isAuthenticated();
+  showBlock("guestView", !authenticated);
+  showBlock("appView", authenticated);
+  if (!authenticated) {
+    closeApiKeyModal();
+    showBlock("appNotice", false);
+  }
 }
 
 function getRegisterLocation() {
@@ -156,9 +296,8 @@ async function loadSummary() {
 
 function renderHeader() {
   const user = state.user || {};
-  const usage = state.workspace?.usage || {};
   setText("headerTitle", `你好，${user.username || "用户"}`);
-  setText("headerSubtitle", "这里只展示当前账号自己的信息与操作。")
+  setText("headerSubtitle", "这里只展示当前账号自己的信息与操作。");
   setText("headerUsername", user.username || "--");
   setText("headerQuota", `剩余次数 ${user.quota_remaining ?? 0}`);
 }
@@ -173,9 +312,12 @@ function renderDashboard() {
   setText("statQuotaUsed", user.quota_used ?? 0);
   setText("statSolveSuccess", usage.solve_success_total ?? 0);
   setText("statSolveFailed", usage.solve_failed_total ?? 0);
-  setText("statSuccessRate", usage.success_rate == null ? "--" : `${Number(usage.success_rate).toFixed(2)}%`);
+  setText(
+    "statSuccessRate",
+    usage.success_rate == null ? "--" : `${Number(usage.success_rate).toFixed(2)}%`,
+  );
   setText("statLastRequest", formatDateTime(usage.last_request_at));
-  setText("usageRuleText", "成功 solve 才扣减 1 次，失败不扣次。")
+  setText("usageRuleText", "最终生成成功才扣减 1 次；失败、取消或报错会返还次数。");
 
   showBlock("latestRedeemEmpty", !latestRedeem);
   showBlock("latestRedeemCard", !!latestRedeem);
@@ -196,19 +338,47 @@ function renderApiKeys() {
     tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">暂无 API Key。</td></tr>';
     return;
   }
-  tbody.innerHTML = items.map((item) => `
-    <tr>
-      <td>${escapeHtml(item.name || "--")}</td>
-      <td>${escapeHtml(item.key_prefix || "--")}</td>
-      <td><span class="status-chip ${item.enabled ? "success" : "warning"}">${item.enabled ? "启用中" : "已禁用"}</span></td>
-      <td>${escapeHtml(String(item.quota_used ?? 0))}</td>
-      <td>${escapeHtml(formatDateTime(item.last_used_at))}</td>
-      <td>
-        <button class="btn subtle mini-btn" type="button" data-action="toggle-api-key" data-id="${item.id}" data-enabled="${item.enabled ? 1 : 0}">${item.enabled ? "禁用" : "启用"}</button>
-        <button class="btn ghost mini-btn" type="button" data-action="delete-api-key" data-id="${item.id}">软删除</button>
-      </td>
-    </tr>
-  `).join("");
+  tbody.innerHTML = items.map((item) => {
+    const rawKey = getCachedApiKey(item.id);
+    const copyLabel = rawKey ? "复制 Key" : "复制前缀";
+    return `
+      <tr>
+        <td>${escapeHtml(item.name || "--")}</td>
+        <td>${escapeHtml(item.key_prefix || "--")}</td>
+        <td><span class="status-chip ${item.enabled ? "success" : "warning"}">${item.enabled ? "启用中" : "已禁用"}</span></td>
+        <td>${escapeHtml(String(item.quota_used ?? 0))}</td>
+        <td>${escapeHtml(formatDateTime(item.last_used_at))}</td>
+        <td>
+          <div class="action-row">
+            <button class="btn subtle mini-btn" type="button" data-action="toggle-api-key" data-id="${item.id}" data-enabled="${item.enabled ? 1 : 0}">${item.enabled ? "禁用" : "启用"}</button>
+            <button class="btn subtle mini-btn" type="button" data-action="copy-api-key" data-id="${item.id}" data-prefix="${escapeHtml(item.key_prefix || "")}">${copyLabel}</button>
+            <button class="btn ghost mini-btn" type="button" data-action="delete-api-key" data-id="${item.id}">软删除</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function renderTransactionsPager() {
+  const infoEl = dom.byId("transactionsPagerInfo");
+  const prevEl = dom.byId("transactionsPrevBtn");
+  const nextEl = dom.byId("transactionsNextBtn");
+  if (!infoEl || !prevEl || !nextEl) {
+    return;
+  }
+  const limit = Math.max(1, Number(state.transactions.limit || DEFAULT_PAGE_LIMIT));
+  const offset = Math.max(0, Number(state.transactions.offset || 0));
+  const total = Math.max(0, Number(state.transactions.total || 0));
+  const page = Math.floor(offset / limit) + 1;
+  const totalPages = total > 0 ? Math.ceil(total / limit) : 1;
+  const from = total > 0 ? offset + 1 : 0;
+  const to = total > 0 ? Math.min(offset + limit, total) : 0;
+  infoEl.textContent = total > 0
+    ? `第 ${page}/${totalPages} 页，显示 ${from}-${to}，共 ${total} 条`
+    : "暂无消费记录。";
+  prevEl.disabled = !state.transactions.has_prev;
+  nextEl.disabled = !state.transactions.has_next;
 }
 
 function renderTransactions() {
@@ -216,9 +386,12 @@ function renderTransactions() {
   if (!tbody) {
     return;
   }
-  const items = Array.isArray(state.workspace?.recent_transactions) ? state.workspace.recent_transactions : [];
+  const items = state.transactions.loaded
+    ? state.transactions.items
+    : (Array.isArray(state.workspace?.recent_transactions) ? state.workspace.recent_transactions : []);
   if (!items.length) {
     tbody.innerHTML = '<tr><td colspan="5" class="empty-cell">暂无消费记录。</td></tr>';
+    renderTransactionsPager();
     return;
   }
   tbody.innerHTML = items.map((item) => {
@@ -233,6 +406,7 @@ function renderTransactions() {
       </tr>
     `;
   }).join("");
+  renderTransactionsPager();
 }
 
 function renderRedeems() {
@@ -255,13 +429,36 @@ function renderRedeems() {
   `).join("");
 }
 
-function renderLogs(items) {
+function renderLogsPager() {
+  const infoEl = dom.byId("logsPagerInfo");
+  const prevEl = dom.byId("logsPrevBtn");
+  const nextEl = dom.byId("logsNextBtn");
+  if (!infoEl || !prevEl || !nextEl) {
+    return;
+  }
+  const limit = Math.max(1, Number(state.logs.limit || DEFAULT_PAGE_LIMIT));
+  const offset = Math.max(0, Number(state.logs.offset || 0));
+  const total = Math.max(0, Number(state.logs.total || 0));
+  const page = Math.floor(offset / limit) + 1;
+  const totalPages = total > 0 ? Math.ceil(total / limit) : 1;
+  const from = total > 0 ? offset + 1 : 0;
+  const to = total > 0 ? Math.min(offset + limit, total) : 0;
+  infoEl.textContent = total > 0
+    ? `第 ${page}/${totalPages} 页，显示 ${from}-${to}，共 ${total} 条`
+    : "暂无日志记录。";
+  prevEl.disabled = !state.logs.has_prev;
+  nextEl.disabled = !state.logs.has_next;
+}
+
+function renderLogs() {
   const tbody = dom.byId("logsTableBody");
   if (!tbody) {
     return;
   }
-  if (!items || !items.length) {
+  const items = state.logs.items || [];
+  if (!items.length) {
     tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">暂无日志记录。</td></tr>';
+    renderLogsPager();
     return;
   }
   tbody.innerHTML = items.map((item) => `
@@ -274,6 +471,7 @@ function renderLogs(items) {
       <td>${escapeHtml(item.error_reason || "-")}</td>
     </tr>
   `).join("");
+  renderLogsPager();
 }
 
 function renderAccount() {
@@ -296,17 +494,44 @@ function renderWorkspace() {
   renderApiKeys();
   renderRedeems();
   renderTransactions();
+  renderLogs();
   renderAccount();
+}
+
+function applyPagedPayload(target, payload, fallbackLimit, fallbackOffset) {
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  const limit = Math.max(1, Number(payload?.limit || fallbackLimit || DEFAULT_PAGE_LIMIT));
+  const offset = Math.max(0, Number(payload?.offset || fallbackOffset || 0));
+  const totalRaw = Number(payload?.total);
+  const total = Number.isFinite(totalRaw)
+    ? Math.max(0, totalRaw)
+    : Math.max(offset + items.length, items.length);
+  target.items = items;
+  target.limit = limit;
+  target.offset = offset;
+  target.total = total;
+  target.has_prev = Boolean(payload?.has_prev) || offset > 0;
+  target.has_next = Boolean(payload?.has_next) || offset + limit < total;
+  target.loaded = true;
 }
 
 async function loadAuthMe() {
   try {
     const payload = await requestJson("/api/portal/auth/me");
-    state.workspace = payload;
-    state.user = payload.user || null;
+    if (payload.authenticated) {
+      state.workspace = payload;
+      state.user = payload.user || null;
+    } else {
+      state.workspace = null;
+      state.user = null;
+      resetTransactionsState();
+      resetLogsState();
+    }
   } catch (_) {
     state.workspace = null;
     state.user = null;
+    resetTransactionsState();
+    resetLogsState();
   }
   renderWorkspace();
 }
@@ -323,18 +548,45 @@ async function loadWorkspace(showNoticeMessage = false) {
   }
 }
 
+async function loadTransactions(showNoticeMessage = false) {
+  if (!isAuthenticated()) {
+    resetTransactionsState();
+    renderTransactions();
+    return;
+  }
+  const limit = Math.max(1, Number(state.transactions.limit || DEFAULT_PAGE_LIMIT));
+  const offset = Math.max(0, Number(state.transactions.offset || 0));
+  const payload = await requestJson(`/api/portal/user/transactions?limit=${limit}&offset=${offset}`);
+  applyPagedPayload(state.transactions, payload, limit, offset);
+  renderTransactions();
+  if (showNoticeMessage) {
+    showNotice("redeemNotice", "次数变化明细已刷新。", "success");
+  }
+}
+
 async function loadLogs(showNoticeMessage = false) {
   if (!isAuthenticated()) {
-    renderLogs([]);
+    resetLogsState();
+    renderLogs();
     return;
   }
   const status = String(dom.byId("logStatusFilter")?.value || "").trim();
   const projectId = String(dom.byId("logProjectFilter")?.value || "").trim();
-  const params = new URLSearchParams({ limit: "20", offset: "0" });
-  if (status) params.set("status", status);
-  if (projectId) params.set("project_id", projectId);
+  const limit = Math.max(1, Number(state.logs.limit || DEFAULT_PAGE_LIMIT));
+  const offset = Math.max(0, Number(state.logs.offset || 0));
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (status) {
+    params.set("status", status);
+  }
+  if (projectId) {
+    params.set("project_id", projectId);
+  }
   const payload = await requestJson(`/api/portal/user/logs?${params.toString()}`);
-  renderLogs(payload.items || []);
+  applyPagedPayload(state.logs, payload, limit, offset);
+  renderLogs();
   if (showNoticeMessage) {
     showNotice("appNotice", "日志已刷新。", "success");
   }
@@ -370,6 +622,9 @@ async function handleLogin(event) {
   });
   await loadAuthMe();
   await loadWorkspace(false);
+  resetTransactionsState();
+  resetLogsState();
+  await loadTransactions(false);
   await loadLogs(false);
   switchPage("dashboard");
   showNotice("appNotice", "登录成功。", "success");
@@ -399,6 +654,9 @@ async function handleRegister(event) {
   });
   await loadAuthMe();
   await loadWorkspace(false);
+  resetTransactionsState();
+  resetLogsState();
+  await loadTransactions(false);
   await loadLogs(false);
   switchPage("dashboard");
   showNotice("appNotice", `注册成功，当前账号 ${username} 已登录。`, "success");
@@ -408,6 +666,9 @@ async function handleLogout() {
   await requestJson("/api/portal/auth/logout", { method: "POST" });
   state.user = null;
   state.workspace = null;
+  resetTransactionsState();
+  resetLogsState();
+  closeApiKeyModal();
   renderShell();
   renderAuthTab("login");
   showNotice("guestNotice", "你已退出登录。", "info");
@@ -424,11 +685,10 @@ async function handleCreateApiKey(event) {
     body: { name },
   });
   dom.byId("newApiKeyName").value = "";
-  showBlock("newApiKeyCard", true);
-  setText("newApiKeyValue", result.api_key || "--");
-  setText("newApiKeyLabel", result.item?.name || name);
-  showNotice("apiKeyNotice", result.message || "API Key 已创建。", "success");
+  cacheRevealedApiKey(result.item?.id, result.api_key || "");
   await loadWorkspace(false);
+  openApiKeyModal(result.item?.name || name, result.api_key || "");
+  showNotice("apiKeyNotice", result.message || "API Key 已创建。", "success");
 }
 
 async function handleApiKeyAction(action, apiKeyId, enabled) {
@@ -448,6 +708,21 @@ async function handleApiKeyAction(action, apiKeyId, enabled) {
   }
 }
 
+async function handleCopyApiKey(apiKeyId, prefix) {
+  const rawKey = getCachedApiKey(apiKeyId);
+  if (rawKey) {
+    await copyText(rawKey);
+    showNotice("apiKeyNotice", `API Key #${apiKeyId} 已复制。`, "success");
+    return;
+  }
+  if (prefix) {
+    await copyText(prefix);
+    showNotice("apiKeyNotice", `完整 Key 未缓存，已复制前缀 ${prefix}。`, "warning");
+    return;
+  }
+  throw new Error("当前没有可复制的 Key 内容");
+}
+
 async function handleRedeem(event) {
   event.preventDefault();
   const code = String(dom.byId("redeemCodeInput")?.value || "").trim();
@@ -460,8 +735,30 @@ async function handleRedeem(event) {
   });
   dom.byId("redeemCodeInput").value = "";
   await loadWorkspace(false);
+  resetTransactionsState();
+  await loadTransactions(false);
   showNotice("redeemNotice", result.message || "兑换成功。", "success");
   showNotice("appNotice", result.message || "兑换成功。", "success");
+}
+
+async function handleCopyTransactionsCurrentPage() {
+  const items = state.transactions.items || [];
+  if (!items.length) {
+    throw new Error("当前页没有可复制的明细");
+  }
+  const text = items.map((item) => {
+    const amount = Number(item.change_amount || 0);
+    const formattedAmount = amount > 0 ? `+${amount}` : String(amount);
+    return [
+      formatDateTime(item.created_at),
+      `变化:${formattedAmount}`,
+      `余额:${item.balance_after ?? "--"}`,
+      `来源:${item.source_type || "--"}`,
+      `说明:${item.note || item.source_ref || "-"}`,
+    ].join(" | ");
+  }).join("\n");
+  await copyText(text);
+  showNotice("redeemNotice", "当前页次数变化明细已复制。", "success");
 }
 
 function wireEvents() {
@@ -509,12 +806,25 @@ function wireEvents() {
           showNotice("appNotice", error.message || "日志加载失败", "error");
         }
       }
+      if (page === "redeem") {
+        try {
+          await loadTransactions(false);
+        } catch (error) {
+          showNotice("redeemNotice", error.message || "明细加载失败", "error");
+        }
+      }
     });
   });
 
   dom.byId("refreshUserBtn")?.addEventListener("click", async () => {
     try {
       await loadWorkspace(true);
+      if (state.page === "redeem") {
+        await loadTransactions(false);
+      }
+      if (state.page === "logs") {
+        await loadLogs(false);
+      }
     } catch (error) {
       showNotice("appNotice", error.message || "刷新失败", "error");
     }
@@ -539,7 +849,6 @@ function wireEvents() {
     }
   });
 
-
   dom.byId("redeemForm")?.addEventListener("submit", async (event) => {
     try {
       await handleRedeem(event);
@@ -548,7 +857,16 @@ function wireEvents() {
     }
   });
 
+  dom.byId("copyTransactionsBtn")?.addEventListener("click", async () => {
+    try {
+      await handleCopyTransactionsCurrentPage();
+    } catch (error) {
+      showNotice("redeemNotice", error.message || "复制失败", "error");
+    }
+  });
+
   const refreshLogs = async () => {
+    state.logs.offset = 0;
     try {
       await loadLogs(true);
     } catch (error) {
@@ -564,21 +882,93 @@ function wireEvents() {
     event.preventDefault();
     await refreshLogs();
   });
+
+  dom.byId("transactionsPrevBtn")?.addEventListener("click", async () => {
+    if (!state.transactions.has_prev) {
+      return;
+    }
+    state.transactions.offset = Math.max(0, state.transactions.offset - state.transactions.limit);
+    try {
+      await loadTransactions(false);
+    } catch (error) {
+      state.transactions.offset += state.transactions.limit;
+      showNotice("redeemNotice", error.message || "上一页加载失败", "error");
+    }
+  });
+
+  dom.byId("transactionsNextBtn")?.addEventListener("click", async () => {
+    if (!state.transactions.has_next) {
+      return;
+    }
+    state.transactions.offset += state.transactions.limit;
+    try {
+      await loadTransactions(false);
+    } catch (error) {
+      state.transactions.offset = Math.max(0, state.transactions.offset - state.transactions.limit);
+      showNotice("redeemNotice", error.message || "下一页加载失败", "error");
+    }
+  });
+
+  dom.byId("logsPrevBtn")?.addEventListener("click", async () => {
+    if (!state.logs.has_prev) {
+      return;
+    }
+    state.logs.offset = Math.max(0, state.logs.offset - state.logs.limit);
+    try {
+      await loadLogs(false);
+    } catch (error) {
+      state.logs.offset += state.logs.limit;
+      showNotice("appNotice", error.message || "上一页加载失败", "error");
+    }
+  });
+
+  dom.byId("logsNextBtn")?.addEventListener("click", async () => {
+    if (!state.logs.has_next) {
+      return;
+    }
+    state.logs.offset += state.logs.limit;
+    try {
+      await loadLogs(false);
+    } catch (error) {
+      state.logs.offset = Math.max(0, state.logs.offset - state.logs.limit);
+      showNotice("appNotice", error.message || "下一页加载失败", "error");
+    }
+  });
+
+  dom.byId("apiKeyModalCloseBtn")?.addEventListener("click", closeApiKeyModal);
+  dom.byId("apiKeyModal")?.addEventListener("click", (event) => {
+    if (event.target === dom.byId("apiKeyModal")) {
+      closeApiKeyModal();
+    }
+  });
+  dom.byId("apiKeyModalCopyBtn")?.addEventListener("click", async () => {
+    try {
+      await copyText(state.apiKeyModal.value || "");
+      showNotice("apiKeyNotice", "完整 Key 已复制。", "success");
+    } catch (error) {
+      showNotice("apiKeyNotice", error.message || "复制失败", "error");
+    }
+  });
 }
 
 async function bootstrap() {
+  loadRevealedApiKeys();
   renderShell();
   renderAuthTab("login");
+  renderTransactionsPager();
+  renderLogsPager();
   wireEvents();
   await loadSummary();
   await loadAuthMe();
   if (isAuthenticated()) {
     await loadWorkspace(false);
+    resetTransactionsState();
+    resetLogsState();
+    await loadTransactions(false);
     await loadLogs(false);
     switchPage("dashboard");
   }
 }
-
 
 document.addEventListener("click", async (event) => {
   const target = event.target;
@@ -592,10 +982,19 @@ document.addEventListener("click", async (event) => {
       showNotice("apiKeyNotice", error.message || "更新 API Key 失败", "error");
     }
   }
+  if (target.dataset.action === "copy-api-key") {
+    try {
+      await handleCopyApiKey(Number(target.dataset.id), String(target.dataset.prefix || "").trim());
+    } catch (error) {
+      showNotice("apiKeyNotice", error.message || "复制 API Key 失败", "error");
+    }
+  }
   if (target.dataset.action === "delete-api-key") {
     const apiKeyId = Number(target.dataset.id);
     const ok = window.confirm(`确定软删除 API Key #${apiKeyId} 吗？软删除后该 Key 会被禁用。`);
-    if (!ok) return;
+    if (!ok) {
+      return;
+    }
     try {
       await handleApiKeyAction("delete", apiKeyId, false);
     } catch (error) {

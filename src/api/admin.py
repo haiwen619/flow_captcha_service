@@ -264,6 +264,21 @@ def _as_float(value: Any, field_name: str, min_value: float, max_value: float) -
     return fv
 
 
+def _build_pagination(limit: int, offset: int, total: int) -> Dict[str, Any]:
+    safe_limit = max(1, int(limit or 1))
+    safe_offset = max(0, int(offset or 0))
+    safe_total = max(0, int(total or 0))
+    return {
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "total": safe_total,
+        "page": (safe_offset // safe_limit) + 1,
+        "total_pages": max(1, (safe_total + safe_limit - 1) // safe_limit) if safe_total > 0 else 1,
+        "has_prev": safe_offset > 0,
+        "has_next": safe_offset + safe_limit < safe_total,
+    }
+
+
 def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], list[str]]:
     allowed_sections = {"server", "storage", "captcha", "log", "cluster"}
     updates: Dict[str, Dict[str, Any]] = {}
@@ -650,15 +665,23 @@ async def update_portal_user(
         raise HTTPException(status_code=500, detail="服务未初始化")
     _assert_portal_admin_role("用户管理")
 
-    updated = await _db.update_portal_user(
-        user_id=user_id,
-        enabled=request.enabled,
-        display_name=request.display_name,
-        quota_remaining_delta=request.quota_remaining_delta,
-        new_password=request.new_password,
-    )
+    try:
+        updated = await _db.update_portal_user(
+            user_id=user_id,
+            username=request.username,
+            enabled=request.enabled,
+            display_name=request.display_name,
+            quota_remaining_delta=request.quota_remaining_delta,
+            quota_remaining=request.quota_remaining,
+            quota_used=request.quota_used,
+            new_password=request.new_password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not updated:
         raise HTTPException(status_code=404, detail="用户不存在")
+    if request.new_password or request.enabled is False:
+        revoke_portal_user_tokens_by_user_id(user_id)
     return {"success": True, "item": updated}
 
 
@@ -756,7 +779,12 @@ async def get_logs(
         raise HTTPException(status_code=500, detail="服务未初始化")
 
     items = await _db.list_job_logs(limit=limit, offset=offset)
-    return {"success": True, "items": items, "limit": limit, "offset": offset}
+    total = await _db.count_job_logs()
+    return {
+        "success": True,
+        "items": items,
+        **_build_pagination(limit=limit, offset=offset, total=total),
+    }
 
 
 @router.get("/stats")
