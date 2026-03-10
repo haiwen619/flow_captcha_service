@@ -80,25 +80,37 @@ def _static_page(filename: str, missing_message: str):
     return FileResponse(page_path)
 
 
+def _public_page_filename() -> str:
+    return "subnode.html" if config.cluster_role == "subnode" else "portal.html"
+
+
 @app.get("/", include_in_schema=False)
 async def root(request: Request):
     accept = str(request.headers.get("accept") or "")
     if "text/html" in accept:
-        return _static_page("portal.html", "用户门户页面不存在")
+        filename = _public_page_filename()
+        return _static_page(filename, "公共页面不存在")
 
     return {
         "service": "flow_captcha_service",
         "status": "ok",
         "node": config.node_name,
         "role": config.cluster_role,
-        "portal": "/portal",
+        "portal": "/portal" if config.cluster_role != "subnode" else None,
+        "public_page": "/" if config.cluster_role == "subnode" else "/portal",
         "admin": "/admin",
     }
 
 
 @app.get("/portal", include_in_schema=False)
 async def portal_alias():
-    return _static_page("portal.html", "用户门户页面不存在")
+    filename = _public_page_filename()
+    return _static_page(filename, "公共页面不存在")
+
+
+@app.get("/subnode", include_in_schema=False)
+async def subnode_page():
+    return _static_page("subnode.html", "子节点页面不存在")
 
 
 @app.get("/admin", include_in_schema=False)

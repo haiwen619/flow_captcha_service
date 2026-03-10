@@ -1,398 +1,735 @@
 # flow_captcha_service
 
-`flow_captcha_service` 是给 `flow2api` 使用的独立打码服务，采用 HTTP 透传方式调用。
+`flow_captcha_service` 是给 `flow2api` 使用的自托管打码服务。
 
-它的核心定位不是“接第三方打码平台”，而是“自己托管有头浏览器打码能力”，并支持主从集群。
+它的目标不是接第三方打码平台，而是自己托管 `Playwright + Chromium`
+有头浏览器能力，并支持单机、主从集群、用户门户、管理后台和额度体系。
 
----
+如果你只想快速理解一句话，可以直接记住下面这句：
 
-## 项目介绍与能力范围
-
-### 1. 能力范围
-
-- 仅支持有头浏览器打码（Playwright + Chromium）
-- 不接 yescaptcha/capsolver 等外部平台
-- 支持会话化流程：`solve -> finish/error`
-- 支持 `standalone / master / subnode` 三种角色
-- 支持独立用户门户（`/`）做接入说明、在线调试、自助日志查询
-- 支持管理面板（`/admin`）做常用运维操作
-- 支持 API Key、额度、日志、集群节点状态管理
-
-### 2. 角色说明
-
-- `standalone`：单机直接打码
-- `master`：只调度子节点，不执行本地浏览器打码
-- `subnode`：执行本地浏览器打码，并向 master 注册/心跳
+> `standalone` 本地自己打码，`master` 只调度不本地打码，
+> `subnode` 负责执行浏览器打码并向 `master` 上报心跳。
 
 ---
 
-## 项目架构
+## 项目介绍
 
-### 1. 逻辑架构
+### 这个项目解决什么问题
+
+`flow2api` 在某些场景下需要一个独立的、有头浏览器驱动的验证码服务。
+`flow_captcha_service` 就是为这个场景准备的独立服务端。
+
+它提供：
+
+- 有头浏览器打码能力
+- `solve -> finish/error` 会话协议
+- 浏览器槽位复用与空闲回收
+- `standalone / master / subnode` 三种部署角色
+- 用户门户、管理员后台、API Key、额度和日志
+- 主从集群调度
+
+它不提供：
+
+- `yescaptcha`、`capsolver` 这类第三方平台接入
+- 子节点上的用户注册/登录首页
+
+---
+
+## 架构与角色
+
+### 架构关系
 
 ```text
 flow2api
    |
    | HTTP
    v
-[master]  (调度，不打码)
+[standalone]                     直接本地打码
+
+或
+
+flow2api
    |
-   | 路由转发（nodeId:childSessionId）
+   | HTTP
    v
-[subnode] (有头浏览器打码)
+[master]                         只调度，不本地起浏览器
+   |
+   | 路由转发
+   v
+[subnode]                        本地执行有头浏览器打码
 ```
 
-### 2. 关闭链路（主节点如何通知子节点关闭）
+### 三种角色说明
 
-本项目没有单独 `/close` 业务接口，关闭语义通过会话协议完成：
+#### 1. `standalone`
 
-1. 上游先调用 `solve`，master 返回 `nodeId:childSessionId`
-2. 业务成功后调用 `finish`
-3. master 按路由 session 转发到对应 subnode
-4. subnode 执行本地 `runtime.finish()`，标记业务会话结束，浏览器通常保持常驻复用
-5. 业务失败则调用 `error`，仅在明确验证码评估失败时回收对应浏览器槽位
+- 单机模式
+- 本地直接执行浏览器打码
+- 适合本地调试、单机部署、小规模使用
+
+#### 2. `master`
+
+- 只负责调度和转发
+- 不执行本地浏览器打码
+- 适合集群入口节点
+
+#### 3. `subnode`
+
+- 执行本地浏览器打码
+- 向 `master` 注册和发送心跳
+- 首页是**子节点状态页**，不是用户登录/注册页
+
+### 访问入口差异
+
+#### `standalone` / `master`
+
+- `/`：用户门户
+- `/portal`：用户门户别名
+- `/admin`：管理后台
+- `/api/v1/health`：健康检查
+
+#### `subnode`
+
+- `/`：子节点状态页
+- `/portal`：同样返回子节点状态页
+- `/subnode`：子节点状态页显式入口
+- `/admin`：管理后台
+- `/api/v1/health`：健康检查
+
+> 从这个版本开始，`subnode` 不再展示用户注册/登录首页。
+> 子节点首页只展示角色、健康状态和后台入口。
 
 ---
 
-## 详细流程图
+## 核心调用流程
 
-### 1. `solve -> finish/error` 主链路时序图
+### 标准链路
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant F as flow2api
-    participant A as flow_captcha_service API
-    participant C as ClusterManager(master)
-    participant R as CaptchaRuntime
-    participant S as SessionRegistry
-    participant B as BrowserCaptchaService
-    participant T as TokenBrowser(slot)
-    participant G as Google Flow / reCAPTCHA
+1. 上游调用 `POST /api/v1/solve`
+2. 服务返回 `session_id`、`token`、`node_name`
+3. 上游拿着 token 继续完成图片/视频等后续业务
+4. 业务成功后调用 `POST /api/v1/sessions/{session_id}/finish`
+5. 业务失败后调用 `POST /api/v1/sessions/{session_id}/error`
 
-    F->>A: POST /api/v1/solve<br/>(project_id, action, token_id)
-    A->>A: 校验 service API key / quota
-    alt master 角色
-        A->>C: dispatch_solve(payload)
-        C->>C: 选择候选 subnode<br/>预留 dispatch slot
-        C->>A: 转发到子节点 /api/v1/solve
-        A->>R: solve(...)
-    else standalone / subnode
-        A->>R: solve(...)
-    end
-    R->>B: get_token(project_id, action, token_id)
-    B->>B: 依据 project_id 选择亲和槽位<br/>空闲优先 + 轮询兜底
-    B->>T: get_or_create_shared_browser()
-    alt 槽位已有共享浏览器
-        T->>T: 复用 shared browser/context/keepalive
-    else 首次启动或已回收
-        T->>T: 创建 playwright/browser/context
-        T->>T: 创建 keepalive page(about:blank)
-    end
-    T->>G: 打开 Flow 页面并执行 reCAPTCHA
-    G-->>T: reCAPTCHA token
-    T-->>B: token + browser_id
-    B-->>R: token + browser_id + fingerprint
-    R->>S: create(session_id, browser_id, project_id, action)
-    R-->>A: session_id + token + fingerprint + expires
-    alt master 角色
-        C->>C: childSessionId -> nodeId:childSessionId
-        C-->>F: 返回 routed session_id
-    else standalone / subnode
-        A-->>F: 返回普通 session_id
-    end
+### 重要语义
 
-    Note over F,A: 上游拿到 token 后，图片/视频请求继续直接走官网
+- `solve` 只负责拿 token，不代表整个上游业务已经完成
+- `finish/error` 是业务会话回收协议
+- 成功时不会强制关闭共享浏览器
+- 只有明确命中验证码失败类错误时，才会回收对应浏览器槽位
 
-    F->>A: POST /api/v1/sessions/{session_id}/finish
-    A->>R: finish(session_id)
-    R->>B: report_request_finished(browser_ref)
-    B->>B: 仅标记业务请求完成<br/>共享浏览器继续常驻复用
-    R->>S: finish(session_id)
-    A-->>F: success
+### 集群下的 `session_id`
 
-    F->>A: POST /api/v1/sessions/{session_id}/error
-    A->>R: mark_error(session_id, error_reason)
-    R->>B: report_error(browser_ref, error_reason)
-    alt 明确命中 reCAPTCHA evaluation/verification failed
-        B->>T: recycle_browser(rotate_profile=true)
-    else 普通业务失败 / 非明确验证码失败
-        B->>B: 浏览器保持常驻，等待后续复用
-    end
-    R->>S: mark_error(session_id)
-    A-->>F: success
+如果当前角色是 `master`，返回的 `session_id` 可能是：
+
+```text
+nodeId:childSessionId
 ```
 
-**这张图对应的真实语义：**
+这表示：
 
-- `solve` 只负责拿到 reCAPTCHA token，并把 `session_id -> browser_id` 关系登记到 `SessionRegistry`
-- `finish` / `error` 是业务会话的回收协议，不是“浏览器一定关闭”的意思
-- 对于常规 `solve` 主路径，浏览器是 **常驻复用** 的；成功后不会主动关闭共享浏览器
-- 只有明确命中 `reCAPTCHA evaluation failed / verification failed` 这类错误时，才会回收该槽位浏览器
-
-### 2. 浏览器槽位复用与回收流程图
-
-```mermaid
-flowchart TD
-    A[收到 get_token 请求] --> B[根据 project_id 选择槽位]
-    B --> C{该槽位已有 shared browser/context 吗}
-    C -- 是 --> D[复用现有 shared browser]
-    C -- 否 --> E[新建 browser/context]
-    E --> F[创建 keepalive page]
-    D --> G[执行 reCAPTCHA]
-    F --> G
-    G --> H{拿到 token 吗}
-    H -- 是 --> I[返回 token + browser_id]
-    I --> J[业务请求继续生成图片或视频]
-    J --> K{上游回调 finish 还是 error}
-    K -- finish --> L[report_request_finished]
-    L --> M[共享浏览器保持常驻]
-    K -- error --> N[report_error]
-    N --> O{错误是否明确属于 reCAPTCHA evaluation/verification failed}
-    O -- 否 --> M
-    O -- 是 --> P[recycle_browser + rotate_profile]
-    P --> Q[下次请求重新拉起浏览器]
-    M --> R{空闲超过 idle TTL 吗}
-    R -- 否 --> S[继续待命复用]
-    R -- 是 --> T[idle reaper 回收该槽位浏览器]
-    T --> U[槽位仍保留, 仅浏览器实例被释放]
-    Q --> U
-```
-
-**关键点：**
-
-- 槽位数量由 `captcha.browser_count` 决定；一个槽位同一时刻只跑一个 solve
-- `finish` 不会关闭共享浏览器，只是让该次业务会话结束
-- `idle TTL` 是自动回收空闲浏览器，不是回收槽位；下次有请求会重新拉起浏览器
-- 如果代理配置变化、浏览器断连、keepalive page 损坏，也会触发槽位级浏览器重建
-
-### 3. master 调度与 routed session 流程图
-
-```mermaid
-flowchart TD
-    A[master 收到 /solve] --> B[拉取可用 subnode 列表]
-    B --> C[结合 heartbeat/runtime stats 计算 effective_capacity]
-    C --> D[按 busy_browser_count 剩余容量 权重 排序候选节点]
-    D --> E{有可派发节点吗}
-    E -- 否 --> F[等待 0.35s 后重试]
-    F --> B
-    E -- 是 --> G[尝试预留 dispatch reservation]
-    G --> H[POST 到子节点 /api/v1/solve]
-    H --> I{子节点成功返回 token 和 childSessionId 吗}
-    I -- 否 --> J[释放 reservation<br/>记录节点错误<br/>换下一个节点]
-    J --> D
-    I -- 是 --> K[释放临时 reservation]
-    K --> L[记录 active routed session]
-    L --> M[包装 session_id 为 nodeId:childSessionId]
-    M --> N[返回给 flow2api]
-
-    N --> O[后续 finish/error 带着 routed session_id 回来]
-    O --> P[master 解析 nodeId + childSessionId]
-    P --> Q[转发到对应 subnode /finish 或 /error]
-    Q --> R[master 本地 active_sessions -1]
-```
-
-**这张图对应的真实语义：**
-
-- master 本身不执行本地有头浏览器打码，只做调度、转发、会话路由
-- `nodeId:childSessionId` 是主节点路由会话格式，保证 `finish/error` 能准确回到原子节点
-- master 额外维护了短时 `dispatch reservation`，用于覆盖 heartbeat 上报延迟，避免瞬时超发
-- 节点容量依据 **busy browser slots** 统计，而不是简单把 `pending session` 当成活跃线程
-
-### 4. `custom-score` 链路流程图
-
-```mermaid
-flowchart TD
-    A[客户端调用 /api/v1/custom-score] --> B{当前角色是 master 吗}
-    B -- 是 --> C[master 按调度逻辑转发到 subnode]
-    B -- 否 --> D[本地 runtime.custom_score]
-    C --> D
-    D --> E[BrowserCaptchaService.get_custom_score]
-    E --> F[使用临时浏览器执行验证码与页面内 verify]
-    F --> G[返回 token / verify_result / fingerprint]
-    G --> H[临时浏览器关闭]
-    H --> I[API 返回 custom score 结果]
-```
-
-**注意：**
-
-- `custom-score` 当前不是常驻共享浏览器链路，而是 **临时浏览器链路**
-- 也就是说，主业务 `solve` 和 `custom-score` 的浏览器生命周期策略并不完全相同
-
-### 5. 关键实现原则
-
-1. **浏览器常驻复用，不等于业务会话常驻占槽**
-   - `solve` 期间槽位忙
-   - token 一旦拿到，槽位的 solve 忙碌态就会释放
-   - 后续图片/视频生成继续跑，但不会把该槽位一直算成 `thread_active`
-
-2. **`pending_sessions` 与 `busy_browser_count` 不是同一个概念**
-   - `pending_sessions`：还没收到 `finish/error` 的业务会话数
-   - `busy_browser_count`：当前真正正在执行 solve 的浏览器槽位数
-   - 调度基于后者，避免“线程看起来一直满”的错觉
-
-3. **同一个 `project_id` 会优先复用历史槽位**
-   - 如果亲和槽位空闲，优先命中原槽位
-   - 如果亲和槽位忙，才扩展到其他空闲槽位
-   - 没有空闲槽位时，再走轮询兜底
-
-4. **成功不关浏览器，明确验证码失败才回收浏览器**
-   - `finish`：保留共享浏览器
-   - `error`：只有在错误文本明确命中 `reCAPTCHA evaluation failed` / `verification failed` 等条件时，才回收浏览器并切换指纹
-   - 普通上游业务失败不会把浏览器全部打掉
-
-5. **空闲自动回收是为了控资源，不是为了打断复用**
-   - 后台 `idle reaper` 每 15 秒巡检一次
-   - 槽位空闲超过 `browser_idle_ttl_seconds` 时，回收该槽位浏览器实例
-   - 新请求进来后，会按同样的槽位选择逻辑重新拉起浏览器
-
-6. **两层句柄不要混淆**
-   - 子节点本地：`browser_ref = browser_id[:request_ref]`
-   - master 对外：`session_id = nodeId:childSessionId`
-   - 前者用于浏览器槽位回调，后者用于跨节点会话路由
-
+- 前半段是 master 侧的节点路由信息
+- 后半段是 subnode 的真实会话 ID
+- 之后的 `finish/error` 会按这个路由再转发回原子节点
 
 ---
 
-## 配置文件与修改方式
+## 部署前准备
 
-### 1. 配置文件位置
+### 运行环境
 
-- 模板：`config/setting_example.toml`
-- Persisted runtime config: `data/setting.toml`
-- Migration: if legacy `config/setting.toml` exists, it is copied to `data/setting.toml` on startup
+- Python 本地运行：建议 `Python 3.11`
+- Docker 部署：需要 `Docker` 和 `Docker Compose`
+- 有头浏览器模式依赖 `Playwright + Chromium`
 
-首次使用：
+### 目录准备
+
+首次部署建议先准备运行目录：
 
 ```bash
+mkdir -p data
 cp config/setting_example.toml data/setting.toml
 ```
 
-### 2. 修改配置的两种方式
+如果你使用 Windows PowerShell，可以按自己的习惯改成等价命令。
 
-#### A. 通过管理面板（推荐）
+### 本地 Python 模式额外安装
 
-- 入口：`http://<host>:<port>/admin`
-- 可在线修改运行配置与系统配置
-- 会提示哪些改动需要重启服务
+本地非 Docker 启动时，除了安装 Python 依赖，还要安装 Chromium：
 
-#### B. Edit `data/setting.toml` directly
+```bash
+pip install -r requirements.txt
+python -m playwright install chromium
+```
 
-- 修改后重启服务生效（部分配置可热生效，但建议按重启策略执行）
+Linux 如果缺系统依赖，可以改用：
 
-### 3. 配置优先级
-
-环境变量优先级高于 `setting.toml`。  
-如果某项被环境变量覆盖，面板会显示提示。
+```bash
+python -m playwright install --with-deps chromium
+```
 
 ---
 
-## 本地部署
+## 配置文件与环境变量
 
-默认端口为 `8060`。
+### 配置文件位置
 
-### 1. standalone（本地单机）
+- 模板文件：`config/setting_example.toml`
+- 运行配置：`data/setting.toml`
+- 兼容迁移：如果存在旧的 `config/setting.toml`，启动时会迁移到
+  `data/setting.toml`
+
+### 配置优先级
+
+建议记住这一条：
+
+```text
+环境变量 > data/setting.toml > 默认配置
+```
+
+`config/setting_example.toml` 只是初始化模板，不是最终优先级来源。
+
+### 常用环境变量
+
+#### 通用
+
+- `FCS_CONFIG_FILE`
+- `FCS_SERVER_HOST`
+- `FCS_SERVER_PORT`
+- `FCS_DB_PATH`
+- `FCS_ADMIN_USERNAME`
+- `FCS_ADMIN_PASSWORD`
+- `FCS_LOG_LEVEL`
+- `FCS_NODE_NAME`
+
+#### 浏览器与打码
+
+- `FCS_BROWSER_COUNT`
+- `FCS_BROWSER_PROXY_ENABLED`
+- `FCS_BROWSER_PROXY_URL`
+- `FCS_BROWSER_LAUNCH_BACKGROUND`
+- `FCS_BROWSER_SCORE_DOM_WAIT_SECONDS`
+- `FCS_BROWSER_RECAPTCHA_SETTLE_SECONDS`
+- `FCS_BROWSER_SCORE_TEST_WARMUP_SECONDS`
+- `FCS_BROWSER_IDLE_TTL_SECONDS`
+- `FCS_FLOW_TIMEOUT`
+- `FCS_UPSAMPLE_TIMEOUT`
+- `FCS_SESSION_TTL_SECONDS`
+
+#### 集群
+
+- `FCS_CLUSTER_ROLE`
+- `FCS_CLUSTER_MASTER_BASE_URL`
+- `FCS_CLUSTER_MASTER_CLUSTER_KEY`
+- `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
+- `FCS_CLUSTER_NODE_API_KEY`
+- `FCS_CLUSTER_HEARTBEAT_INTERVAL_SECONDS`
+- `FCS_CLUSTER_NODE_WEIGHT`
+- `FCS_CLUSTER_NODE_MAX_CONCURRENCY`
+- `FCS_CLUSTER_MASTER_NODE_STALE_SECONDS`
+- `FCS_CLUSTER_MASTER_DISPATCH_TIMEOUT_SECONDS`
+
+### 一个容易忽略的点
+
+```text
+cluster.node_max_concurrency = 0
+```
+
+实际含义是：
+
+- 不单独指定固定并发
+- 自动跟随 `browser_count`
+
+---
+
+## 快速开始
+
+### 方式一：本地单机 `standalone`
+
+这是最适合第一次跑通服务的方式。
+
+#### 1. 创建虚拟环境
 
 ```bash
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# Linux/Mac
-source .venv/bin/activate
+```
 
+Windows：
+
+```powershell
+.venv\Scripts\activate
+```
+
+Linux / macOS：
+
+```bash
+source .venv/bin/activate
+```
+
+#### 2. 安装依赖
+
+```bash
 pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+#### 3. 准备配置
+
+```bash
+mkdir -p data
+cp config/setting_example.toml data/setting.toml
+```
+
+确认 `data/setting.toml` 中：
+
+```toml
+[cluster]
+role = "standalone"
+```
+
+#### 4. 启动服务
+
+```bash
 python main.py
 ```
 
-访问：
+#### 5. 启动后访问
 
 - 用户门户：`http://127.0.0.1:8060/`
-- 服务健康检查：`http://127.0.0.1:8060/api/v1/health`
-- 管理面板：`http://127.0.0.1:8060/admin`
+- 管理后台：`http://127.0.0.1:8060/admin`
+- 健康检查：`http://127.0.0.1:8060/api/v1/health`
 
-### 2. 本地主从（不走 Docker）
+### 方式二：Docker 单机 `standalone`
 
-- 启动 master：`FCS_CLUSTER_ROLE=master`
-- 启动 subnode：`FCS_CLUSTER_ROLE=subnode` 并配置：
-  - `FCS_CLUSTER_MASTER_BASE_URL`
-  - `FCS_CLUSTER_MASTER_CLUSTER_KEY`
-  - `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
-  - `FCS_CLUSTER_NODE_API_KEY`
+对应文件：`docker-compose.headed.yml`
 
----
+#### 1. 准备目录
 
-## Docker 部署（含持久化）
+```bash
+mkdir -p data config
+cp config/setting_example.toml data/setting.toml
+```
 
-> 推荐始终保留持久化挂载，否则重启后会丢失数据库、API Key、cluster key、日志等状态。
-
-### 1. 持久化目录建议
-
-- `./data`：数据库与运行状态（必须持久化）
-- `./config`：配置文件（建议持久化）
-
-### 2. standalone（有头）
+#### 2. 启动
 
 ```bash
 docker compose -f docker-compose.headed.yml up -d --build
 ```
 
-默认已挂载：
+#### 3. 访问
 
-- `./data:/app/data`
-- `./config:/app/config`
+- 用户门户：`http://127.0.0.1:8060/`
+- 管理后台：`http://127.0.0.1:8060/admin`
+- 健康检查：`http://127.0.0.1:8060/api/v1/health`
 
-### 3. master（轻量镜像）
+#### 4. 说明
+
+- 该模式使用 `Dockerfile.headed`
+- 镜像内已安装 `Playwright Chromium + Xvfb + fluxbox`
+- 默认角色是 `standalone`
+- `./data:/app/data` 必须保留，否则数据库、日志、密钥等状态会丢失
+
+---
+
+## 使用教程
+
+下面这部分是“服务已经启动之后，怎么真正接入”。
+
+### 教程 A：管理员第一次初始化
+
+#### 1. 打开管理后台
+
+访问：
+
+```text
+http://127.0.0.1:8060/admin
+```
+
+默认管理员账号通常是：
+
+```text
+admin / admin
+```
+
+首次登录后建议马上修改。
+
+#### 2. 创建对接方式
+
+你有两种常见用法：
+
+- 直接在后台创建服务 API Key，给上游程序直接调用
+- 让用户走门户注册/登录，再在门户里创建自己的 API Key
+
+### 教程 B：用户门户模式
+
+只适用于 `standalone` 或 `master`。
+
+#### 1. 打开门户
+
+```text
+http://127.0.0.1:8060/
+```
+
+#### 2. 注册或登录
+
+门户支持：
+
+- 登录
+- 注册
+- 查看额度
+- 兑换 CDK
+- 查看调用记录
+- 自助创建自己的 API Key
+
+#### 3. 创建个人 API Key
+
+登录后进入 `API Key` 页面，创建自己的 Key。
+
+### 教程 C：服务 API 直连模式
+
+下面是最常见的接入方式。
+
+#### 1. 调用 `solve`
+
+```bash
+curl -X POST "http://127.0.0.1:8060/api/v1/solve" \
+  -H "Authorization: Bearer <YOUR_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "demo-project",
+    "action": "IMAGE_GENERATION"
+  }'
+```
+
+返回示例：
+
+```json
+{
+  "success": true,
+  "session_id": "123456",
+  "token": "recaptcha-token",
+  "fingerprint": {},
+  "node_name": "standalone-node",
+  "expires_in_seconds": 1200
+}
+```
+
+如果当前入口是 `master`，`session_id` 可能是：
+
+```text
+12:child-session-id
+```
+
+这属于正常现象，后续 `finish/error` 原样带回即可。
+
+#### 2. 业务成功后调用 `finish`
+
+```bash
+curl -X POST "http://127.0.0.1:8060/api/v1/sessions/<SESSION_ID>/finish" \
+  -H "Authorization: Bearer <YOUR_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "status": "success"
+  }'
+```
+
+#### 3. 业务失败后调用 `error`
+
+```bash
+curl -X POST "http://127.0.0.1:8060/api/v1/sessions/<SESSION_ID>/error" \
+  -H "Authorization: Bearer <YOUR_API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "error_reason": "upstream_error"
+  }'
+```
+
+### 教程 D：`custom-score`
+
+如果你要做自定义 score 调试，可以调用：
+
+```text
+POST /api/v1/custom-score
+```
+
+请求体包含：
+
+- `website_url`
+- `website_key`
+- `verify_url`
+- `action`
+- `enterprise`
+
+---
+
+## 集群部署教程
+
+### 1. Docker 部署 `master`
+
+对应文件：`docker-compose.cluster.master.yml`
+
+#### 适用场景
+
+- 作为集群统一入口
+- 只调度，不本地打码
+- 镜像更轻，不安装 Chromium
+
+#### 启动步骤
+
+1. 准备配置目录
+
+如果你只是单独启动这个 `master` compose：
+
+```bash
+mkdir -p data config
+cp config/setting_example.toml data/setting.toml
+```
+
+如果你准备和 `subnode` 在同一仓库目录同时启动，不要直接使用默认的
+`./data:/app/data`。请先把 compose 里的挂载改成：
+
+```yaml
+volumes:
+  - ./data/master:/app/data
+```
+
+然后再准备：
+
+```bash
+mkdir -p data/master config
+cp config/setting_example.toml data/master/setting.toml
+```
+
+2. 启动前确认角色
+
+```text
+FCS_CLUSTER_ROLE=master
+```
+
+3. 启动
 
 ```bash
 docker compose -f docker-compose.cluster.master.yml up -d --build
 ```
 
-使用 `Dockerfile.master`（不安装 Playwright/Chromium，镜像更小）。
+#### 默认访问入口
 
-### 4. subnode（有头镜像）
+- 管理后台：`http://127.0.0.1:8060/admin`
+- 用户门户：`http://127.0.0.1:8060/`
+- 健康检查：`http://127.0.0.1:8060/api/v1/health`
+
+#### 说明
+
+- `master` 使用 `Dockerfile.master`
+- 不安装 `Playwright/Chromium`
+- 当前 compose 默认挂载是 `./data:/app/data`
+
+> 如果你打算在同一台机器、同一仓库目录里分别启动 `master`
+> 和 `subnode`，不要共用同一个 `./data` 目录。
+> 否则会共享数据库和运行状态。
+
+### 2. Docker 部署 `subnode`
+
+对应文件：`docker-compose.cluster.subnode.yml`
+
+#### 适用场景
+
+- 集群执行节点
+- 本地有头浏览器打码
+- 向 `master` 注册与发送心跳
+
+#### 启动前必须替换的变量
+
+- `FCS_CLUSTER_MASTER_BASE_URL`
+- `FCS_CLUSTER_MASTER_CLUSTER_KEY`
+- `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
+- `FCS_CLUSTER_NODE_API_KEY`
+
+#### 启动步骤
+
+1. 准备配置目录
+
+如果你只是单独启动这个 `subnode` compose：
+
+```bash
+mkdir -p data config
+cp config/setting_example.toml data/setting.toml
+```
+
+如果你准备和 `master` 在同一仓库目录同时启动，不要直接使用默认的
+`./data:/app/data`。请先把 compose 里的挂载改成：
+
+```yaml
+volumes:
+  - ./data/subnode:/app/data
+```
+
+然后再准备：
+
+```bash
+mkdir -p data/subnode config
+cp config/setting_example.toml data/subnode/setting.toml
+```
+
+2. 修改关键环境变量
+
+默认 compose 里是示例值，不能直接拿到生产环境使用。
+
+重点解释：
+
+- `FCS_CLUSTER_MASTER_BASE_URL`
+  - 填 `master` 实际可访问地址
+- `FCS_CLUSTER_MASTER_CLUSTER_KEY`
+  - 填主节点 cluster key
+- `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
+  - 填主节点能访问到的当前子节点地址
+- `FCS_CLUSTER_NODE_API_KEY`
+  - 填子节点内部认证 key
+
+3. 启动
 
 ```bash
 docker compose -f docker-compose.cluster.subnode.yml up -d --build
 ```
 
-启动前要替换：
+#### 默认访问入口
 
-- `FCS_CLUSTER_MASTER_CLUSTER_KEY`
-- `FCS_CLUSTER_NODE_API_KEY`
+- 子节点状态页：`http://127.0.0.1:8061/`
+- 管理后台：`http://127.0.0.1:8061/admin`
+- 健康检查：`http://127.0.0.1:8061/api/v1/health`
 
----
+#### 非常重要的注意事项
 
-## 一键部署（master + subnode）
+- `FCS_CLUSTER_NODE_PUBLIC_BASE_URL` 不能填 `127.0.0.1`
+- 不能填 `localhost`
+- 不能填 `0.0.0.0`
+- 必须是 `master` 真正能访问到的地址
+
+另外：
+
+- `host.docker.internal` 只适合本机开发或 Docker Desktop 场景
+- Linux 服务器或跨机器部署时，应改成真实地址
+
+### 3. 一键启动 `master + subnode`
+
+对应文件：`docker-compose.cluster.stack.yml`
+
+这是最推荐的最小集群示例。
+
+#### 1. 准备 `.env`
+
+```env
+FCS_MASTER_NODE_NAME=master-1
+FCS_SUBNODE_NODE_NAME=subnode-1
+FCS_CLUSTER_MASTER_CLUSTER_KEY=replace-with-master-cluster-key
+FCS_CLUSTER_NODE_API_KEY=replace-with-node-internal-key
+FCS_CLUSTER_MASTER_BASE_URL=http://flow-captcha-master:8060
+FCS_CLUSTER_NODE_PUBLIC_BASE_URL=http://flow-captcha-subnode:8060
+FCS_CLUSTER_NODE_WEIGHT=100
+FCS_CLUSTER_NODE_MAX_CONCURRENCY=0
+FCS_CLUSTER_HEARTBEAT_INTERVAL_SECONDS=15
+FCS_LOG_LEVEL=INFO
+```
+
+#### 2. 启动
 
 ```bash
 docker compose -f docker-compose.cluster.stack.yml up -d --build
 ```
 
-该方案同时拉起：
+#### 3. 访问
 
-- `flow-captcha-master`（轻量镜像）
-- `flow-captcha-subnode`（有头镜像）
+- master 用户门户：`http://127.0.0.1:8060/`
+- master 管理后台：`http://127.0.0.1:8060/admin`
+- master 健康检查：`http://127.0.0.1:8060/api/v1/health`
+- subnode 状态页：`http://127.0.0.1:8061/`
+- subnode 健康检查：`http://127.0.0.1:8061/api/v1/health`
 
-默认持久化路径：
+#### 4. 这个 compose 的优点
+
+- 已把 `master` 和 `subnode` 的数据目录拆开
+- 默认更适合作为第一次验证集群调度的示例
+
+挂载如下：
 
 - `./data/master:/app/data`
 - `./data/subnode:/app/data`
-- `./config:/app/config`
 
-启动前至少替换：
+---
 
-- `FCS_CLUSTER_MASTER_CLUSTER_KEY`
-- `FCS_CLUSTER_NODE_API_KEY`
+## 每种模式必须改什么
+
+### `standalone`
+
+- 一般可以直接启动
+- 按需调整 `browser_count`
+- 按需调整代理
+- 建议修改管理员账号密码
+
+### `master`
+
+- 建议修改 `FCS_NODE_NAME`
+- 建议修改管理员账号密码
+- 如果有多个子节点，建议统一规划 cluster key
+
+### `subnode`
+
+- 必改 `FCS_CLUSTER_MASTER_BASE_URL`
+- 必改 `FCS_CLUSTER_MASTER_CLUSTER_KEY`
+- 必改 `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
+- 必改 `FCS_CLUSTER_NODE_API_KEY`
+- 建议修改 `FCS_NODE_NAME`
+
+### `stack`
+
+- 必改 `FCS_CLUSTER_MASTER_CLUSTER_KEY`
+- 必改 `FCS_CLUSTER_NODE_API_KEY`
+- 如果不是容器内互联场景，要改 master/subnode 的实际对外地址
+
+---
+
+## 启动后怎么验证
+
+### 验证 1：服务是否存活
+
+```bash
+curl http://127.0.0.1:8060/api/v1/health
+```
+
+返回示例：
+
+```json
+{
+  "success": true,
+  "status": "ok",
+  "node_name": "master-1",
+  "role": "master"
+}
+```
+
+### 验证 2：页面是否符合角色预期
+
+- `standalone`：`/` 应该是用户门户
+- `master`：`/` 应该是用户门户
+- `subnode`：`/` 应该是子节点状态页
+
+### 验证 3：集群是否连通
+
+在 `master` 管理后台查看：
+
+- 子节点是否出现
+- 心跳是否持续更新
+- 有效容量是否正常
+- 节点是否健康
 
 ---
 
 ## GHCR 镜像
 
-项目通过 GitHub Actions 自动发布到 GHCR：
+仓库支持通过 GHCR 发布镜像：
 
-- `ghcr.io/<owner>/flow_captcha_service-master`（轻量 master）
-- `ghcr.io/<owner>/flow_captcha_service-headed`（有头 standalone/subnode）
-- 发布架构：`linux/amd64`、`linux/arm64`
+- `ghcr.io/<owner>/flow_captcha_service-master`
+- `ghcr.io/<owner>/flow_captcha_service-headed`
 
 拉取示例：
 
@@ -401,26 +738,71 @@ docker pull ghcr.io/genz27/flow_captcha_service-master:latest
 docker pull ghcr.io/genz27/flow_captcha_service-headed:latest
 ```
 
-### 拉取镜像是否需要环境变量？
+说明：
 
-- `docker pull`：不需要环境变量
-- `docker run / docker compose up`：需要按角色配置环境变量
-
-如果仓库/包是私有，请先使用带 `read:packages` 权限的 PAT 登录 GHCR。
+- `master` 镜像用于主节点
+- `headed` 镜像用于 `standalone` 或 `subnode`
 
 ---
 
 ## 常见问题
 
-### `exec /usr/local/bin/entrypoint.headed.sh: exec format error`
+### 1. 为什么子节点首页没有登录/注册？
 
-排查顺序：
+这是当前版本的设计。
 
-1. 确认机器架构（你是 `x86_64/amd64`）
-2. 确认拉到的是新镜像（重新 `docker pull`）
-3. 删除旧 tag 本地缓存后再拉取并重启容器
+`subnode` 首页现在是**子节点状态页**，只用于：
 
-本仓库已将有头镜像启动方式改为内联 `bash` 启动流程，不再依赖脚本文件执行，可避免该错误。
+- 看当前角色
+- 看健康状态
+- 进后台排查
 
+用户门户只应该放在 `master` 或 `standalone`。
 
-- `cluster.node_max_concurrency = 0` means the dispatcher follows `captcha.browser_count`.
+### 2. 为什么主节点和子节点不能共用一个 `data` 目录？
+
+因为会共用：
+
+- 数据库
+- API Key
+- 集群状态
+- 日志
+
+结果会导致状态混乱。
+
+### 3. 本地 Python 启动后浏览器起不来怎么办？
+
+优先检查：
+
+1. 是否执行过 `python -m playwright install chromium`
+2. Linux 是否缺依赖，必要时使用
+   `python -m playwright install --with-deps chromium`
+3. 代理或显示环境是否异常
+
+### 4. `cluster.node_max_concurrency = 0` 是什么意思？
+
+表示：
+
+- 不手动固定并发值
+- 自动跟随 `browser_count`
+
+### 5. `master` 会不会本地执行浏览器打码？
+
+不会。
+
+`master` 只负责调度和转发，真正执行浏览器打码的是 `subnode`
+或者 `standalone`。
+
+---
+
+## 总结
+
+如果你是第一次接触这个项目，最推荐的顺序是：
+
+1. 先跑 `standalone`
+2. 用 `/admin` 创建 API Key
+3. 用 `solve -> finish/error` 跑通一遍
+4. 再尝试 `master + subnode` 集群
+
+如果你看到子节点首页不是登录页，而是状态页，这不是异常，
+而是当前版本的预期行为。

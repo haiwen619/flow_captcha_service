@@ -119,8 +119,23 @@ def _build_cluster_summary(cluster_stats: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_quickstart(base_url: str) -> Dict[str, Any]:
+    if config.cluster_role == "subnode":
+        return {
+            "base_url": base_url,
+            "entry_mode": "subnode-status",
+            "auth_scheme": "Service API Key / Master Dispatch",
+            "console_actions": ["solve", "finish", "error", "custom-score"],
+            "endpoints": [
+                {"name": "子节点状态页", "method": "GET", "path": "/", "description": "子节点首页仅展示节点状态、健康检查和后台入口，不提供用户注册/登录。"},
+                {"name": "健康检查", "method": "GET", "path": "/api/v1/health", "description": "用于容器健康探测、节点联通性确认和部署排查。"},
+                {"name": "服务打码", "method": "POST", "path": "/api/v1/solve", "description": "可用于内部联调，生产集群通常由 master 调度转发到 subnode。"},
+                {"name": "管理后台", "method": "GET", "path": "/admin", "description": "管理员查看运行配置、日志和本节点执行状态。"},
+            ],
+        }
+
     return {
         "base_url": base_url,
+        "entry_mode": "user-portal",
         "auth_scheme": "Portal User Token / Service API Key",
         "console_actions": ["solve", "finish", "error", "custom-score"],
         "endpoints": [
@@ -235,7 +250,9 @@ async def get_portal_overview(request: Request):
             "service": "flow_captcha_service",
             "node_name": config.node_name,
             "role": config.cluster_role,
-            "portal_path": "/portal",
+            "portal_path": "/portal" if config.cluster_role != "subnode" else None,
+            "public_path": "/",
+            "public_page_variant": "subnode-status" if config.cluster_role == "subnode" else "user-portal",
             "admin_path": "/admin",
         },
         "service": {
@@ -243,16 +260,18 @@ async def get_portal_overview(request: Request):
             "node_name": config.node_name,
             "role": config.cluster_role,
             "local_solve_enabled": config.cluster_role != "master",
+            "public_page_variant": "subnode-status" if config.cluster_role == "subnode" else "user-portal",
         },
         "health": {
             "status": "ok",
             "local_solve_enabled": config.cluster_role != "master",
         },
         "capabilities": {
-            "user_portal": True,
+            "user_portal": config.cluster_role != "subnode",
             "self_register": config.cluster_role != "subnode",
             "user_login": config.cluster_role != "subnode",
             "cdk_redeem": config.cluster_role != "subnode",
+            "subnode_status_page": config.cluster_role == "subnode",
             "api_console": True,
             "session_center": True,
             "public_cluster_board": config.cluster_role == "master",
