@@ -189,6 +189,10 @@ python -m playwright install --with-deps chromium
 
 `config/setting_example.toml` 只是初始化模板，不是最终优先级来源。
 
+如果你想看按角色拆开的详细填写说明，直接看：
+
+- `docs/ROLE_CONFIG_GUIDE.md`
+
 ### 常用环境变量
 
 #### 通用
