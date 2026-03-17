@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..core.config import config
 from ..core.database import Database
+from ..core.diagnostics import diag_label
 from ..core.logger import debug_logger
 from .session_registry import SessionRegistry, SessionEntry
 
@@ -94,6 +95,7 @@ class CaptchaRuntime:
     async def finish(self, session_id: str) -> Tuple[bool, str, Optional[SessionEntry]]:
         entry = await self.registry.get(session_id)
         if not entry:
+            debug_logger.log_warning(f"[CaptchaRuntime] finish missing session_id={session_id}")
             return False, "session_not_found", None
 
         if entry.status != "pending":
@@ -107,6 +109,7 @@ class CaptchaRuntime:
     async def mark_error(self, session_id: str, error_reason: str) -> Tuple[bool, str, Optional[SessionEntry]]:
         entry = await self.registry.get(session_id)
         if not entry:
+            debug_logger.log_warning(f"[CaptchaRuntime] error missing session_id={session_id} error_reason={error_reason}")
             return False, "session_not_found", None
 
         if entry.status != "pending":
@@ -200,12 +203,20 @@ class CaptchaRuntime:
                     started = time.perf_counter()
                     for entry in expired_entries:
                         try:
+                            age_seconds = max(0, int(time.time() - entry.created_at.timestamp()))
+                            debug_logger.log_warning(
+                                "[CaptchaRuntime] session expired before finish "
+                                f"session_id={entry.session_id} action={entry.action} "
+                                f"project_id={entry.project_id} age={age_seconds}s"
+                            )
                             await self._browser_service.report_error(
                                 entry.browser_id,
                                 error_reason=entry.error_reason or "session_timeout",
                             )
                         except Exception as e:
-                            debug_logger.log_warning(f"[CaptchaRuntime] expired session cleanup failed: {e}")
+                            debug_logger.log_warning(
+                                f"[CaptchaRuntime] expired session cleanup failed {diag_label(e)}: {e}"
+                            )
                     elapsed = int((time.perf_counter() - started) * 1000)
                     debug_logger.log_info(
                         f"[CaptchaRuntime] cleaned {len(expired_entries)} expired session(s) in {elapsed}ms"
@@ -226,7 +237,7 @@ class CaptchaRuntime:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                debug_logger.log_warning(f"[CaptchaRuntime] cleanup loop error: {e}")
+                debug_logger.log_warning(f"[CaptchaRuntime] cleanup loop error {diag_label(e)}: {e}")
 
     async def close(self):
         if self._cleanup_task and not self._cleanup_task.done():

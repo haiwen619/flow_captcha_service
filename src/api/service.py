@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..core.auth import verify_service_api_key
 from ..core.config import config
 from ..core.database import Database
+from ..core.diagnostics import diag_label
+from ..core.logger import debug_logger
 from ..core.models import CustomScoreRequest, ErrorRequest, FinishRequest, SolveRequest, SolveResponse
 from ..services.captcha_runtime import CaptchaRuntime
 from ..services.cluster_manager import ClusterManager
@@ -26,27 +28,15 @@ def set_dependencies(db: Database, runtime: CaptchaRuntime, cluster_manager: Clu
     _cluster = cluster_manager
 
 
-async def _refund_session_quota(api_key: dict, session_id: str, reason: str):
+async def _safe_create_job_log(**kwargs):
     if _db is None:
         return
-
-    portal_user_id = int(api_key.get("portal_user_id") or 0)
-    portal_api_key_id = int(api_key.get("portal_api_key_id") or 0)
-    if portal_user_id > 0:
-        await _db.refund_portal_user_quota(
-            user_id=portal_user_id,
-            session_id=session_id,
-            reason=reason,
-            portal_api_key_id=portal_api_key_id or None,
-        )
-        return
-
-    api_key_id = int(api_key.get("id") or 0)
-    if api_key_id > 0:
-        await _db.refund_api_key_quota(
-            api_key_id=api_key_id,
-            session_id=session_id,
-            reason=reason,
+    try:
+        await _db.create_job_log(**kwargs)
+    except Exception as e:
+        debug_logger.log_warning(
+            "[service_api] create_job_log failed "
+            f"status={kwargs.get('status')} session_id={kwargs.get('session_id')}: {e}"
         )
 
 
@@ -123,7 +113,7 @@ async def solve_captcha(
             raise HTTPException(status_code=403, detail=consume_message)
 
         elapsed = int((time.perf_counter() - started) * 1000)
-        await _db.create_job_log(
+        await _safe_create_job_log(
             session_id=result.get("session_id") if result else None,
             api_key_id=int(api_key.get("id", 0)),
             project_id=request.project_id,
@@ -140,7 +130,7 @@ async def solve_captcha(
         raise
     except Exception as e:
         elapsed = int((time.perf_counter() - started) * 1000)
-        await _db.create_job_log(
+        await _safe_create_job_log(
             session_id=result.get("session_id") if result else None,
             api_key_id=int(api_key.get("id", 0)),
             project_id=request.project_id,
@@ -171,31 +161,42 @@ async def finish_session(
             await _cluster.dispatch_finish(session_id, request.status)
             message = "ok"
         except Exception as e:
+            debug_logger.log_warning(
+                "[service_api] finish dispatch failed "
+                f"session_id={session_id} status={request.status} {diag_label(e)}: {e}"
+            )
             raise HTTPException(status_code=500, detail=f"finish 转发失败: {e}")
     else:
-        ok, message, entry = await _runtime.finish(session_id)
+        try:
+            ok, message, entry = await _runtime.finish(session_id)
+        except Exception as e:
+            debug_logger.log_warning(
+                "[service_api] local finish failed "
+                f"session_id={session_id} {diag_label(e)}: {e}"
+            )
+            raise HTTPException(status_code=500, detail=f"finish 本地处理失败: {e}")
         if not ok:
             raise HTTPException(status_code=404, detail=message)
 
     normalized_status = str(request.status or "").strip().lower()
-    if normalized_status and normalized_status != "success":
-        await _refund_session_quota(
-            api_key=api_key,
+    refund_reason = f"finish:{normalized_status}" if normalized_status and normalized_status != "success" else None
+    try:
+        await _db.finalize_service_session(
             session_id=session_id,
-            reason=f"finish:{normalized_status}",
+            api_key_id=int(api_key.get("id", 0)),
+            project_id=entry.project_id if entry else None,
+            action=entry.action if entry else None,
+            status=f"finish:{request.status}",
+            error_reason=None,
+            portal_user_id=int(api_key.get("portal_user_id") or 0) or None,
+            portal_api_key_id=int(api_key.get("portal_api_key_id") or 0) or None,
+            refund_reason=refund_reason,
         )
-
-    await _db.create_job_log(
-        session_id=session_id,
-        api_key_id=int(api_key.get("id", 0)),
-        project_id=entry.project_id if entry else None,
-        action=entry.action if entry else None,
-        status=f"finish:{request.status}",
-        error_reason=None,
-        duration_ms=None,
-        portal_user_id=int(api_key.get("portal_user_id") or 0) or None,
-        portal_api_key_id=int(api_key.get("portal_api_key_id") or 0) or None,
-    )
+    except Exception as e:
+        debug_logger.log_warning(
+            "[service_api] finalize finish failed "
+            f"status={request.status} session_id={session_id} {diag_label(e)}: {e}"
+        )
     return {"success": True, "message": message}
 
 
@@ -216,29 +217,40 @@ async def report_session_error(
             await _cluster.dispatch_error(session_id, request.error_reason)
             message = "ok"
         except Exception as e:
+            debug_logger.log_warning(
+                "[service_api] error dispatch failed "
+                f"session_id={session_id} error_reason={request.error_reason} {diag_label(e)}: {e}"
+            )
             raise HTTPException(status_code=500, detail=f"error 转发失败: {e}")
     else:
-        ok, message, entry = await _runtime.mark_error(session_id, request.error_reason)
+        try:
+            ok, message, entry = await _runtime.mark_error(session_id, request.error_reason)
+        except Exception as e:
+            debug_logger.log_warning(
+                "[service_api] local error failed "
+                f"session_id={session_id} error_reason={request.error_reason} {diag_label(e)}: {e}"
+            )
+            raise HTTPException(status_code=500, detail=f"error 本地处理失败: {e}")
         if not ok:
             raise HTTPException(status_code=404, detail=message)
 
-    await _refund_session_quota(
-        api_key=api_key,
-        session_id=session_id,
-        reason=request.error_reason or "error_reported",
-    )
-
-    await _db.create_job_log(
-        session_id=session_id,
-        api_key_id=int(api_key.get("id", 0)),
-        project_id=entry.project_id if entry else None,
-        action=entry.action if entry else None,
-        status="error_reported",
-        error_reason=request.error_reason,
-        duration_ms=None,
-        portal_user_id=int(api_key.get("portal_user_id") or 0) or None,
-        portal_api_key_id=int(api_key.get("portal_api_key_id") or 0) or None,
-    )
+    try:
+        await _db.finalize_service_session(
+            session_id=session_id,
+            api_key_id=int(api_key.get("id", 0)),
+            project_id=entry.project_id if entry else None,
+            action=entry.action if entry else None,
+            status="error_reported",
+            error_reason=request.error_reason,
+            portal_user_id=int(api_key.get("portal_user_id") or 0) or None,
+            portal_api_key_id=int(api_key.get("portal_api_key_id") or 0) or None,
+            refund_reason=request.error_reason or "error_reported",
+        )
+    except Exception as e:
+        debug_logger.log_warning(
+            "[service_api] finalize error failed "
+            f"session_id={session_id} error_reason={request.error_reason} {diag_label(e)}: {e}"
+        )
     return {"success": True, "message": message}
 
 

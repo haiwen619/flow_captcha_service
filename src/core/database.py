@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,9 +15,189 @@ from .models import CaptchaConfig
 
 
 class Database:
+    SQLITE_BUSY_TIMEOUT_MS = 30000
+
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path or config.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def _connect(self):
+        async with aiosqlite.connect(
+            self.db_path,
+            timeout=self.SQLITE_BUSY_TIMEOUT_MS / 1000,
+        ) as db:
+            await db.execute(f"PRAGMA busy_timeout = {self.SQLITE_BUSY_TIMEOUT_MS}")
+            await db.execute("PRAGMA foreign_keys = ON")
+            yield db
+
+    @asynccontextmanager
+    async def _write_connect(self):
+        async with self._write_lock:
+            async with self._connect() as db:
+                yield db
+
+    async def _create_portal_user_job_log_in_tx(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        portal_user_id: int,
+        session_id: Optional[str],
+        project_id: Optional[str],
+        action: Optional[str],
+        status: str,
+        error_reason: Optional[str],
+        duration_ms: Optional[int],
+    ):
+        await db.execute(
+            """
+            INSERT INTO portal_user_jobs (portal_user_id, session_id, project_id, action, status, error_reason, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (portal_user_id, session_id, project_id, action, status, error_reason, duration_ms),
+        )
+
+    async def _create_job_log_in_tx(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        session_id: Optional[str],
+        api_key_id: Optional[int],
+        project_id: Optional[str],
+        action: Optional[str],
+        status: str,
+        error_reason: Optional[str],
+        duration_ms: Optional[int],
+        portal_user_id: Optional[int] = None,
+        portal_api_key_id: Optional[int] = None,
+    ):
+        await db.execute(
+            """
+            INSERT INTO captcha_jobs (session_id, api_key_id, project_id, action, status, error_reason, duration_ms, portal_user_id, portal_api_key_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, api_key_id, project_id, action, status, error_reason, duration_ms, portal_user_id, portal_api_key_id),
+        )
+
+    async def _refund_portal_user_quota_in_tx(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        user_id: int,
+        session_id: str,
+        reason: str,
+        portal_api_key_id: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id
+            FROM session_quota_events
+            WHERE session_id = ? AND owner_type = 'portal_user' AND owner_id = ? AND event_type = 'charge'
+            LIMIT 1
+            """,
+            (session_id, user_id),
+        )
+        charged = await cursor.fetchone()
+        if not charged:
+            return False, "未找到可返还的扣次记录"
+
+        cursor = await db.execute(
+            """
+            INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
+            VALUES (?, 'portal_user', ?, 'refund', ?)
+            """,
+            (session_id, user_id, (reason or "")[:200] or None),
+        )
+        if int(cursor.rowcount or 0) <= 0:
+            return True, "该会话已返还次数"
+
+        await db.execute(
+            """
+            UPDATE portal_users
+            SET quota_remaining = quota_remaining + 1,
+                quota_used = MAX(quota_used - 1, 0),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (user_id,),
+        )
+        cursor = await db.execute("SELECT quota_remaining FROM portal_users WHERE id = ?", (user_id,))
+        updated = await cursor.fetchone()
+        balance_after = int(updated["quota_remaining"] or 0) if updated else 0
+        await db.execute(
+            """
+            INSERT INTO portal_user_transactions (portal_user_id, change_amount, balance_after, source_type, source_ref, note)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                1,
+                balance_after,
+                "generation_refund",
+                session_id,
+                (reason or "生成失败返还次数")[:200],
+            ),
+        )
+        if portal_api_key_id and int(portal_api_key_id) > 0:
+            await db.execute(
+                """
+                UPDATE portal_user_api_keys
+                SET quota_used = MAX(quota_used - 1, 0),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (int(portal_api_key_id),),
+            )
+        return True, "已返还 1 次"
+
+    async def _refund_api_key_quota_in_tx(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        api_key_id: int,
+        session_id: str,
+        reason: str,
+    ) -> Tuple[bool, str]:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            """
+            SELECT id
+            FROM session_quota_events
+            WHERE session_id = ? AND owner_type = 'service_api_key' AND owner_id = ? AND event_type = 'charge'
+            LIMIT 1
+            """,
+            (session_id, api_key_id),
+        )
+        charged = await cursor.fetchone()
+        if not charged:
+            return False, "未找到可返还的扣次记录"
+
+        cursor = await db.execute(
+            """
+            INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
+            VALUES (?, 'service_api_key', ?, 'refund', ?)
+            """,
+            (session_id, api_key_id, (reason or "")[:200] or None),
+        )
+        if int(cursor.rowcount or 0) <= 0:
+            return True, "该会话已返还次数"
+
+        await db.execute(
+            """
+            UPDATE service_api_keys
+            SET quota_remaining = CASE
+                    WHEN quota_remaining IS NULL THEN NULL
+                    ELSE quota_remaining + 1
+                END,
+                quota_used = MAX(quota_used - 1, 0),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (api_key_id,),
+        )
+        return True, "已返还 1 次"
 
     @staticmethod
     def _hash_secret(value: str) -> str:
@@ -31,8 +213,10 @@ class Database:
         return raw_key, Database._hash_secret(raw_key), raw_key[:12]
 
     async def init_db(self):
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA journal_mode = WAL")
+            await db.execute("PRAGMA synchronous = NORMAL")
 
             await db.execute(
                 """
@@ -367,7 +551,7 @@ class Database:
         await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
     async def _ensure_defaults(self):
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
 
             cursor = await db.execute("SELECT id FROM captcha_config WHERE id = 1")
@@ -406,7 +590,7 @@ class Database:
             await db.commit()
 
     async def verify_admin_credentials(self, username: str, password: str) -> bool:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT username, password_hash FROM service_admin WHERE id = 1"
@@ -419,7 +603,7 @@ class Database:
             return row["password_hash"] == self._hash_secret(password)
 
     async def get_admin_profile(self) -> Dict[str, Any]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT username, created_at, updated_at FROM service_admin WHERE id = 1"
@@ -439,7 +623,7 @@ class Database:
         new_username: Optional[str] = None,
         new_password: Optional[str] = None,
     ) -> tuple[bool, str, Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT username, password_hash, created_at, updated_at FROM service_admin WHERE id = 1"
@@ -475,7 +659,7 @@ class Database:
         return True, "管理员账号更新成功", profile
 
     async def get_portal_user(self, user_id: int) -> Optional[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -494,7 +678,7 @@ class Database:
         if not normalized:
             return None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -527,7 +711,7 @@ class Database:
         if existing:
             return False, "该用户名已经注册", None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 """
                 INSERT INTO portal_users (username, display_name, password_hash, register_location, enabled, quota_remaining, quota_used)
@@ -549,7 +733,7 @@ class Database:
         return await self.get_portal_user(int(user["id"]))
 
     async def mark_portal_user_login(self, user_id: int):
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE portal_users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (user_id,),
@@ -557,7 +741,7 @@ class Database:
             await db.commit()
 
     async def list_portal_users(self) -> List[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -610,7 +794,7 @@ class Database:
         new_quota_used = max(0, int(quota_used)) if quota_used is not None else int(current.get("quota_used") or 0)
         new_password_hash = self._hash_secret(new_password) if new_password else None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             if new_password_hash:
                 await db.execute(
                     """
@@ -691,7 +875,7 @@ class Database:
         note: Optional[str] = None,
         portal_api_key_id: Optional[int] = None,
     ) -> Tuple[bool, str]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -767,74 +951,18 @@ class Database:
         if not normalized_session_id:
             return False, "session_id 不能为空"
 
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._write_connect() as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                cursor = await db.execute(
-                    """
-                    SELECT id
-                    FROM session_quota_events
-                    WHERE session_id = ? AND owner_type = 'portal_user' AND owner_id = ? AND event_type = 'charge'
-                    LIMIT 1
-                    """,
-                    (normalized_session_id, user_id),
+                refunded, message = await self._refund_portal_user_quota_in_tx(
+                    db,
+                    user_id=user_id,
+                    session_id=normalized_session_id,
+                    reason=reason,
+                    portal_api_key_id=portal_api_key_id,
                 )
-                charged = await cursor.fetchone()
-                if not charged:
-                    await db.execute("ROLLBACK")
-                    return False, "未找到可返还的扣次记录"
-
-                cursor = await db.execute(
-                    """
-                    INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
-                    VALUES (?, 'portal_user', ?, 'refund', ?)
-                    """,
-                    (normalized_session_id, user_id, (reason or "")[:200] or None),
-                )
-                if int(cursor.rowcount or 0) <= 0:
-                    await db.commit()
-                    return True, "该会话已返还次数"
-
-                await db.execute(
-                    """
-                    UPDATE portal_users
-                    SET quota_remaining = quota_remaining + 1,
-                        quota_used = MAX(quota_used - 1, 0),
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (user_id,),
-                )
-                cursor = await db.execute("SELECT quota_remaining FROM portal_users WHERE id = ?", (user_id,))
-                updated = await cursor.fetchone()
-                balance_after = int(updated["quota_remaining"] or 0) if updated else 0
-                await db.execute(
-                    """
-                    INSERT INTO portal_user_transactions (portal_user_id, change_amount, balance_after, source_type, source_ref, note)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        user_id,
-                        1,
-                        balance_after,
-                        "generation_refund",
-                        normalized_session_id,
-                        (reason or "生成失败返还次数")[:200],
-                    ),
-                )
-                if portal_api_key_id and int(portal_api_key_id) > 0:
-                    await db.execute(
-                        """
-                        UPDATE portal_user_api_keys
-                        SET quota_used = MAX(quota_used - 1, 0),
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                        """,
-                        (int(portal_api_key_id),),
-                    )
                 await db.commit()
-                return True, "已返还 1 次"
+                return refunded, message
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
@@ -849,13 +977,16 @@ class Database:
         error_reason: Optional[str],
         duration_ms: Optional[int],
     ):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO portal_user_jobs (portal_user_id, session_id, project_id, action, status, error_reason, duration_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (portal_user_id, session_id, project_id, action, status, error_reason, duration_ms),
+        async with self._write_connect() as db:
+            await self._create_portal_user_job_log_in_tx(
+                db,
+                portal_user_id=portal_user_id,
+                session_id=session_id,
+                project_id=project_id,
+                action=action,
+                status=status,
+                error_reason=error_reason,
+                duration_ms=duration_ms,
             )
             await db.commit()
 
@@ -881,7 +1012,7 @@ class Database:
 
         where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
         params.extend([safe_limit, safe_offset])
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"""
@@ -924,7 +1055,7 @@ class Database:
             params.append(str(project_id).strip())
 
         where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"""
@@ -966,7 +1097,7 @@ class Database:
             "error_reported",
         )
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
 
             portal_cursor = await db.execute(
@@ -1185,7 +1316,7 @@ class Database:
         if not user:
             return None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1281,7 +1412,7 @@ class Database:
         normalized_note = str(note or "").strip()[:200] or None
 
         created: List[Dict[str, Any]] = []
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             for _ in range(safe_count):
                 while True:
@@ -1311,7 +1442,7 @@ class Database:
 
     async def list_portal_cdks(self, limit: int = 500) -> List[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 1000))
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1328,7 +1459,7 @@ class Database:
             return [dict(row) for row in rows]
 
     async def update_portal_cdk(self, cdk_id: int, enabled: Optional[bool] = None) -> Optional[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM portal_cdks WHERE id = ?", (cdk_id,))
             current = await cursor.fetchone()
@@ -1346,7 +1477,7 @@ class Database:
 
     async def list_portal_user_cdk_redeems(self, user_id: int, limit: int = 20) -> List[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 100))
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1366,7 +1497,7 @@ class Database:
         if not normalized_code:
             return False, "兑换码不能为空", None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -1434,7 +1565,7 @@ class Database:
         source_ref: Optional[str] = None,
         note: Optional[str] = None,
     ):
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """
                 INSERT INTO portal_user_transactions (portal_user_id, change_amount, balance_after, source_type, source_ref, note)
@@ -1445,7 +1576,7 @@ class Database:
             await db.commit()
 
     async def count_portal_user_transactions(self, portal_user_id: int) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1466,7 +1597,7 @@ class Database:
     ) -> List[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 200))
         safe_offset = max(0, int(offset))
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1484,7 +1615,7 @@ class Database:
     async def create_portal_user_api_key(self, portal_user_id: int, name: str) -> Tuple[str, Dict[str, Any]]:
         raw_key, key_hash, key_prefix = self._generate_service_api_key()
         normalized_name = str(name or "").strip() or f"key-{portal_user_id}"
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 """
                 INSERT INTO portal_user_api_keys (portal_user_id, name, key_hash, key_prefix, enabled)
@@ -1498,7 +1629,7 @@ class Database:
         return raw_key, item or {}
 
     async def get_portal_user_api_key(self, api_key_id: int, portal_user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             sql = """
                 SELECT id, portal_user_id, name, key_prefix, enabled, quota_used, created_at, updated_at, last_used_at
@@ -1514,7 +1645,7 @@ class Database:
             return dict(row) if row else None
 
     async def list_portal_user_api_keys(self, portal_user_id: int) -> List[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1540,7 +1671,7 @@ class Database:
             return None
         new_name = str(name or current.get("name") or "").strip() or str(current.get("name") or "")
         new_enabled = int(bool(enabled)) if enabled is not None else int(bool(current.get("enabled")))
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """
                 UPDATE portal_user_api_keys
@@ -1553,7 +1684,7 @@ class Database:
         return await self.get_portal_user_api_key(api_key_id, portal_user_id=portal_user_id)
 
     async def set_portal_user_api_keys_enabled(self, portal_user_id: int, enabled: bool):
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE portal_user_api_keys SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE portal_user_id = ?",
                 (1 if enabled else 0, portal_user_id),
@@ -1562,7 +1693,7 @@ class Database:
 
     async def resolve_portal_user_api_key(self, raw_key: str) -> Optional[Dict[str, Any]]:
         key_hash = self._hash_secret(raw_key)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1595,7 +1726,7 @@ class Database:
             params.append(str(project_id).strip())
         params.extend([safe_limit, safe_offset])
         where_sql = " AND ".join(conditions)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"""
@@ -1613,7 +1744,7 @@ class Database:
             return [dict(row) for row in rows]
 
     async def get_captcha_config(self) -> CaptchaConfig:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM captcha_config WHERE id = 1")
             row = await cursor.fetchone()
@@ -1634,7 +1765,7 @@ class Database:
         browser_proxy_url: Optional[str],
         browser_count: int,
     ):
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """
                 UPDATE captcha_config
@@ -1653,7 +1784,7 @@ class Database:
         key_hash = self._hash_secret(raw_key)
         key_prefix = raw_key[:12]
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             cursor = await db.execute(
                 """
                 INSERT INTO service_api_keys (name, key_hash, key_prefix, enabled, quota_remaining)
@@ -1668,7 +1799,7 @@ class Database:
         return raw_key, row
 
     async def get_api_key(self, api_key_id: int) -> Optional[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1685,7 +1816,7 @@ class Database:
             return dict(row)
 
     async def list_api_keys(self) -> List[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1713,7 +1844,7 @@ class Database:
         new_enabled = int(enabled) if enabled is not None else int(bool(current["enabled"]))
         new_quota = quota_remaining if quota_remaining is not None else current["quota_remaining"]
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 """
                 UPDATE service_api_keys
@@ -1728,7 +1859,7 @@ class Database:
 
     async def resolve_service_api_key(self, raw_key: str) -> Optional[Dict[str, Any]]:
         key_hash = self._hash_secret(raw_key)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1765,7 +1896,7 @@ class Database:
         if api_key_id <= 0:
             return True, ""
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -1836,50 +1967,17 @@ class Database:
         if not normalized_session_id:
             return False, "session_id 不能为空"
 
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._write_connect() as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                cursor = await db.execute(
-                    """
-                    SELECT id
-                    FROM session_quota_events
-                    WHERE session_id = ? AND owner_type = 'service_api_key' AND owner_id = ? AND event_type = 'charge'
-                    LIMIT 1
-                    """,
-                    (normalized_session_id, api_key_id),
-                )
-                charged = await cursor.fetchone()
-                if not charged:
-                    await db.execute("ROLLBACK")
-                    return False, "未找到可返还的扣次记录"
-
-                cursor = await db.execute(
-                    """
-                    INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
-                    VALUES (?, 'service_api_key', ?, 'refund', ?)
-                    """,
-                    (normalized_session_id, api_key_id, (reason or "")[:200] or None),
-                )
-                if int(cursor.rowcount or 0) <= 0:
-                    await db.commit()
-                    return True, "该会话已返还次数"
-
-                await db.execute(
-                    """
-                    UPDATE service_api_keys
-                    SET quota_remaining = CASE
-                            WHEN quota_remaining IS NULL THEN NULL
-                            ELSE quota_remaining + 1
-                        END,
-                        quota_used = MAX(quota_used - 1, 0),
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (api_key_id,),
+                refunded, message = await self._refund_api_key_quota_in_tx(
+                    db,
+                    api_key_id=api_key_id,
+                    session_id=normalized_session_id,
+                    reason=reason,
                 )
                 await db.commit()
-                return True, "已返还 1 次"
+                return refunded, message
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
@@ -1896,20 +1994,118 @@ class Database:
         portal_user_id: Optional[int] = None,
         portal_api_key_id: Optional[int] = None,
     ):
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO captcha_jobs (session_id, api_key_id, project_id, action, status, error_reason, duration_ms, portal_user_id, portal_api_key_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (session_id, api_key_id, project_id, action, status, error_reason, duration_ms, portal_user_id, portal_api_key_id),
+        async with self._write_connect() as db:
+            await self._create_job_log_in_tx(
+                db,
+                session_id=session_id,
+                api_key_id=api_key_id,
+                project_id=project_id,
+                action=action,
+                status=status,
+                error_reason=error_reason,
+                duration_ms=duration_ms,
+                portal_user_id=portal_user_id,
+                portal_api_key_id=portal_api_key_id,
             )
             await db.commit()
+
+    async def finalize_service_session(
+        self,
+        *,
+        session_id: Optional[str],
+        api_key_id: Optional[int],
+        project_id: Optional[str],
+        action: Optional[str],
+        status: str,
+        error_reason: Optional[str],
+        portal_user_id: Optional[int] = None,
+        portal_api_key_id: Optional[int] = None,
+        refund_reason: Optional[str] = None,
+    ):
+        normalized_session_id = str(session_id or "").strip() or None
+        normalized_refund_reason = str(refund_reason or "").strip() or None
+
+        async with self._write_connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                if normalized_session_id and normalized_refund_reason:
+                    if int(portal_user_id or 0) > 0:
+                        await self._refund_portal_user_quota_in_tx(
+                            db,
+                            user_id=int(portal_user_id),
+                            session_id=normalized_session_id,
+                            reason=normalized_refund_reason,
+                            portal_api_key_id=int(portal_api_key_id or 0) or None,
+                        )
+                    elif int(api_key_id or 0) > 0:
+                        await self._refund_api_key_quota_in_tx(
+                            db,
+                            api_key_id=int(api_key_id),
+                            session_id=normalized_session_id,
+                            reason=normalized_refund_reason,
+                        )
+
+                await self._create_job_log_in_tx(
+                    db,
+                    session_id=normalized_session_id,
+                    api_key_id=api_key_id,
+                    project_id=project_id,
+                    action=action,
+                    status=status,
+                    error_reason=error_reason,
+                    duration_ms=None,
+                    portal_user_id=portal_user_id,
+                    portal_api_key_id=portal_api_key_id,
+                )
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    async def finalize_portal_user_session(
+        self,
+        *,
+        portal_user_id: int,
+        session_id: Optional[str],
+        project_id: Optional[str],
+        action: Optional[str],
+        status: str,
+        error_reason: Optional[str],
+        refund_reason: Optional[str] = None,
+    ):
+        normalized_session_id = str(session_id or "").strip() or None
+        normalized_refund_reason = str(refund_reason or "").strip() or None
+
+        async with self._write_connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                if normalized_session_id and normalized_refund_reason:
+                    await self._refund_portal_user_quota_in_tx(
+                        db,
+                        user_id=int(portal_user_id),
+                        session_id=normalized_session_id,
+                        reason=normalized_refund_reason,
+                    )
+
+                await self._create_portal_user_job_log_in_tx(
+                    db,
+                    portal_user_id=int(portal_user_id),
+                    session_id=normalized_session_id,
+                    project_id=project_id,
+                    action=action,
+                    status=status,
+                    error_reason=error_reason,
+                    duration_ms=None,
+                )
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
 
     async def list_job_logs(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         safe_limit = max(1, min(int(limit), 500))
         safe_offset = max(0, int(offset))
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -1927,7 +2123,7 @@ class Database:
             return [dict(row) for row in rows]
 
     async def count_job_logs(self) -> int:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT COUNT(*) AS total FROM captcha_jobs")
             row = await cursor.fetchone()
@@ -1961,7 +2157,7 @@ class Database:
         where_sql = " AND ".join(conditions)
         params.extend([safe_limit, safe_offset])
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"""
@@ -1984,7 +2180,7 @@ class Database:
         if not api_key:
             return None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
 
             cursor = await db.execute(
@@ -2080,7 +2276,7 @@ class Database:
         }
 
     async def get_service_stats(self) -> Dict[str, Any]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
 
             cursor = await db.execute(
@@ -2154,7 +2350,7 @@ class Database:
             }
 
     async def get_cluster_key(self) -> str:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT cluster_key FROM cluster_settings WHERE id = 1")
             row = await cursor.fetchone()
@@ -2162,7 +2358,7 @@ class Database:
                 return row["cluster_key"]
 
         new_key = self._generate_cluster_key()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "INSERT OR REPLACE INTO cluster_settings (id, cluster_key, updated_at) VALUES (1, ?, CURRENT_TIMESTAMP)",
                 (new_key,),
@@ -2172,7 +2368,7 @@ class Database:
 
     async def rotate_cluster_key(self) -> str:
         new_key = self._generate_cluster_key()
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute(
                 "UPDATE cluster_settings SET cluster_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
                 (new_key,),
@@ -2200,7 +2396,7 @@ class Database:
         normalized_name = node_name.strip()
         normalized_url = base_url.strip().rstrip("/")
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT id FROM cluster_nodes WHERE base_url = ? ORDER BY id ASC LIMIT 1",
@@ -2283,7 +2479,7 @@ class Database:
     ) -> Optional[Dict[str, Any]]:
         normalized_name = node_name.strip()
         normalized_url = base_url.strip().rstrip("/")
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT id FROM cluster_nodes WHERE base_url = ? ORDER BY id ASC LIMIT 1",
@@ -2329,7 +2525,7 @@ class Database:
         return await self.get_cluster_node(node_id)
 
     async def list_cluster_nodes(self) -> List[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -2345,14 +2541,14 @@ class Database:
             return [dict(row) for row in rows]
 
     async def get_cluster_node(self, node_id: int) -> Optional[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM cluster_nodes WHERE id = ?", (node_id,))
             row = await cursor.fetchone()
             return dict(row) if row else None
 
     async def get_cluster_node_by_name(self, node_name: str) -> Optional[Dict[str, Any]]:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM cluster_nodes WHERE node_name = ?", (node_name,))
             row = await cursor.fetchone()
@@ -2360,7 +2556,7 @@ class Database:
 
     async def get_cluster_node_by_base_url(self, base_url: str) -> Optional[Dict[str, Any]]:
         normalized_url = base_url.strip().rstrip("/")
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM cluster_nodes WHERE base_url = ? ORDER BY id ASC LIMIT 1",
@@ -2388,7 +2584,7 @@ class Database:
             else max(1, int(current["max_concurrency"] or 1))
         )
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             await db.execute(
                 """
                 UPDATE cluster_nodes
@@ -2405,7 +2601,7 @@ class Database:
         return await self.get_cluster_node(node_id)
 
     async def delete_cluster_node(self, node_id: int) -> bool:
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             await db.execute("DELETE FROM cluster_node_heartbeats WHERE node_id = ?", (node_id,))
             await db.execute("DELETE FROM cluster_node_errors WHERE node_id = ?", (node_id,))
             cursor = await db.execute("DELETE FROM cluster_nodes WHERE id = ?", (node_id,))
@@ -2413,7 +2609,7 @@ class Database:
             return (cursor.rowcount or 0) > 0
 
     async def mark_cluster_node_error(self, node_id: int, error_message: str, error_type: str = "runtime"):
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             await db.execute(
                 """
                 UPDATE cluster_nodes
@@ -2449,7 +2645,7 @@ class Database:
         if active_delta == 0 and cached_delta == 0:
             return
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             await db.execute(
                 """
                 UPDATE cluster_nodes
@@ -2471,7 +2667,7 @@ class Database:
         reason: Optional[str] = None,
     ):
         safe_payload = payload if isinstance(payload, dict) else {}
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._write_connect() as db:
             await db.execute(
                 """
                 INSERT INTO cluster_node_heartbeats (node_id, event_type, healthy, reason, payload_json)
@@ -2489,7 +2685,7 @@ class Database:
 
     async def list_cluster_node_heartbeats(self, node_id: int, limit: int = 20) -> List[Dict[str, Any]]:
         safe_limit = min(max(1, int(limit or 20)), 100)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -2522,7 +2718,7 @@ class Database:
 
     async def list_cluster_node_errors(self, node_id: int, limit: int = 20) -> List[Dict[str, Any]]:
         safe_limit = min(max(1, int(limit or 20)), 100)
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -2539,7 +2735,7 @@ class Database:
 
     async def get_available_cluster_nodes(self, stale_seconds: int) -> List[Dict[str, Any]]:
         stale_seconds = max(10, int(stale_seconds))
-        async with aiosqlite.connect(self.db_path) as db:
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """
@@ -2559,3 +2755,4 @@ class Database:
     async def get_token(self, token_id: int):
         """兼容 browser_captcha.py 的调用；独立打码服务默认不维护业务 token。"""
         return None
+

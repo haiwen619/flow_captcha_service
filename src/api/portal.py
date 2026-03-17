@@ -14,6 +14,8 @@ from ..core.auth import (
 )
 from ..core.config import config
 from ..core.database import Database
+from ..core.diagnostics import diag_label
+from ..core.logger import debug_logger
 from ..core.models import (
     CustomScoreRequest,
     ErrorRequest,
@@ -221,14 +223,16 @@ async def _cleanup_portal_success_result(result: Optional[Dict[str, Any]]):
             pass
 
 
-async def _refund_portal_session_quota(user_id: int, session_id: str, reason: str):
+async def _safe_create_portal_user_job_log(**kwargs):
     if _db is None:
         return
-    await _db.refund_portal_user_quota(
-        user_id=user_id,
-        session_id=session_id,
-        reason=reason,
-    )
+    try:
+        await _db.create_portal_user_job_log(**kwargs)
+    except Exception as e:
+        debug_logger.log_warning(
+            "[portal_api] create_portal_user_job_log failed "
+            f"status={kwargs.get('status')} session_id={kwargs.get('session_id')}: {e}"
+        )
 
 
 @router.get("/overview")
@@ -562,7 +566,7 @@ async def portal_user_solve(request: SolveRequest, user: dict = Depends(verify_p
             raise HTTPException(status_code=403, detail=consume_message)
 
         elapsed = int((time.perf_counter() - started) * 1000)
-        await _db.create_portal_user_job_log(
+        await _safe_create_portal_user_job_log(
             portal_user_id=user_id,
             session_id=result.get("session_id") if result else None,
             project_id=request.project_id,
@@ -576,7 +580,7 @@ async def portal_user_solve(request: SolveRequest, user: dict = Depends(verify_p
         raise
     except Exception as e:
         elapsed = int((time.perf_counter() - started) * 1000)
-        await _db.create_portal_user_job_log(
+        await _safe_create_portal_user_job_log(
             portal_user_id=user_id,
             session_id=result.get("session_id") if result else None,
             project_id=request.project_id,
@@ -605,29 +609,40 @@ async def portal_user_finish_session(
             await _cluster.dispatch_finish(session_id, request.status)
             message = "ok"
         except Exception as e:
+            debug_logger.log_warning(
+                "[portal_api] finish dispatch failed "
+                f"session_id={session_id} status={request.status} {diag_label(e)}: {e}"
+            )
             raise HTTPException(status_code=500, detail=f"finish 转发失败: {e}")
     else:
-        ok, message, entry = await _runtime.finish(session_id)
+        try:
+            ok, message, entry = await _runtime.finish(session_id)
+        except Exception as e:
+            debug_logger.log_warning(
+                "[portal_api] local finish failed "
+                f"session_id={session_id} {diag_label(e)}: {e}"
+            )
+            raise HTTPException(status_code=500, detail=f"finish 本地处理失败: {e}")
         if not ok:
             raise HTTPException(status_code=404, detail=message)
 
     normalized_status = str(request.status or "").strip().lower()
-    if normalized_status and normalized_status != "success":
-        await _refund_portal_session_quota(
-            user_id=int(user["id"]),
+    refund_reason = f"finish:{normalized_status}" if normalized_status and normalized_status != "success" else None
+    try:
+        await _db.finalize_portal_user_session(
+            portal_user_id=int(user["id"]),
             session_id=session_id,
-            reason=f"finish:{normalized_status}",
+            project_id=entry.project_id if entry else None,
+            action=entry.action if entry else None,
+            status=f"finish:{request.status}",
+            error_reason=None,
+            refund_reason=refund_reason,
         )
-
-    await _db.create_portal_user_job_log(
-        portal_user_id=int(user["id"]),
-        session_id=session_id,
-        project_id=entry.project_id if entry else None,
-        action=entry.action if entry else None,
-        status=f"finish:{request.status}",
-        error_reason=None,
-        duration_ms=None,
-    )
+    except Exception as e:
+        debug_logger.log_warning(
+            "[portal_api] finalize finish failed "
+            f"status={request.status} session_id={session_id} {diag_label(e)}: {e}"
+        )
     return {"success": True, "message": message}
 
 
@@ -648,27 +663,38 @@ async def portal_user_report_error(
             await _cluster.dispatch_error(session_id, request.error_reason)
             message = "ok"
         except Exception as e:
+            debug_logger.log_warning(
+                "[portal_api] error dispatch failed "
+                f"session_id={session_id} error_reason={request.error_reason} {diag_label(e)}: {e}"
+            )
             raise HTTPException(status_code=500, detail=f"error 转发失败: {e}")
     else:
-        ok, message, entry = await _runtime.mark_error(session_id, request.error_reason)
+        try:
+            ok, message, entry = await _runtime.mark_error(session_id, request.error_reason)
+        except Exception as e:
+            debug_logger.log_warning(
+                "[portal_api] local error failed "
+                f"session_id={session_id} error_reason={request.error_reason} {diag_label(e)}: {e}"
+            )
+            raise HTTPException(status_code=500, detail=f"error 本地处理失败: {e}")
         if not ok:
             raise HTTPException(status_code=404, detail=message)
 
-    await _refund_portal_session_quota(
-        user_id=int(user["id"]),
-        session_id=session_id,
-        reason=request.error_reason or "error_reported",
-    )
-
-    await _db.create_portal_user_job_log(
-        portal_user_id=int(user["id"]),
-        session_id=session_id,
-        project_id=entry.project_id if entry else None,
-        action=entry.action if entry else None,
-        status="error_reported",
-        error_reason=request.error_reason,
-        duration_ms=None,
-    )
+    try:
+        await _db.finalize_portal_user_session(
+            portal_user_id=int(user["id"]),
+            session_id=session_id,
+            project_id=entry.project_id if entry else None,
+            action=entry.action if entry else None,
+            status="error_reported",
+            error_reason=request.error_reason,
+            refund_reason=request.error_reason or "error_reported",
+        )
+    except Exception as e:
+        debug_logger.log_warning(
+            "[portal_api] finalize error failed "
+            f"session_id={session_id} error_reason={request.error_reason} {diag_label(e)}: {e}"
+        )
     return {"success": True, "message": message}
 
 
@@ -708,7 +734,7 @@ async def portal_user_custom_score(
             raise HTTPException(status_code=403, detail=consume_message)
 
         elapsed = int((time.perf_counter() - started) * 1000)
-        await _db.create_portal_user_job_log(
+        await _safe_create_portal_user_job_log(
             portal_user_id=user_id,
             session_id=None,
             project_id=request.website_url,
@@ -741,7 +767,7 @@ async def portal_user_custom_score(
         raise
     except Exception as e:
         elapsed = int((time.perf_counter() - started) * 1000)
-        await _db.create_portal_user_job_log(
+        await _safe_create_portal_user_job_log(
             portal_user_id=user_id,
             session_id=None,
             project_id=request.website_url,

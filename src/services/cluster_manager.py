@@ -11,6 +11,7 @@ import urllib.request
 
 from ..core.config import config
 from ..core.database import Database
+from ..core.diagnostics import diag_label
 from ..core.logger import debug_logger
 
 
@@ -19,6 +20,7 @@ class ClusterManager:
         self.db = db
         self.runtime = runtime
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._subnode_registered = False
         self._dispatch_cursor = 0
         self._dispatch_lock = asyncio.Lock()
         # 记录短时调度预留槽位，用于覆盖“心跳上报滞后”窗口，避免瞬时超发。
@@ -40,6 +42,7 @@ class ClusterManager:
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
+        self._subnode_registered = False
 
     @staticmethod
     def _dispatch_poll_interval_seconds() -> float:
@@ -93,7 +96,9 @@ class ClusterManager:
                     await self._release_dispatch_slot(node_id)
                     last_error = str(e)
                     await self.db.mark_cluster_node_error(int(node["id"]), last_error, error_type="dispatch")
-                    debug_logger.log_warning(f"[ClusterManager] dispatch solve node={node['node_name']} failed: {last_error}")
+                    debug_logger.log_warning(
+                        f"[ClusterManager] dispatch solve node={node['node_name']} {diag_label(e)} failed: {last_error}"
+                    )
 
             if dispatched_this_round and last_error:
                 debug_logger.log_warning(
@@ -104,12 +109,20 @@ class ClusterManager:
     async def dispatch_finish(self, routed_session_id: str, status: str) -> Dict[str, Any]:
         node, child_session = await self._resolve_routed_session(routed_session_id)
         payload = {"status": status}
-        result = await self._post_to_node(
-            node=node,
-            path=f"/api/v1/sessions/{child_session}/finish",
-            json_payload=payload,
-            timeout=20,
-        )
+        try:
+            result = await self._post_to_node(
+                node=node,
+                path=f"/api/v1/sessions/{child_session}/finish",
+                json_payload=payload,
+                timeout=20,
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                "[ClusterManager] dispatch finish failed "
+                f"session_id={routed_session_id} node={node.get('node_name')} "
+                f"status={status} {diag_label(e)}: {e}"
+            )
+            raise
         node_id = int(node.get("id") or 0)
         adjust_node_id = await self._mark_dispatch_session_finished(routed_session_id, fallback_node_id=node_id)
         if adjust_node_id:
@@ -124,12 +137,20 @@ class ClusterManager:
     async def dispatch_error(self, routed_session_id: str, error_reason: str) -> Dict[str, Any]:
         node, child_session = await self._resolve_routed_session(routed_session_id)
         payload = {"error_reason": error_reason}
-        result = await self._post_to_node(
-            node=node,
-            path=f"/api/v1/sessions/{child_session}/error",
-            json_payload=payload,
-            timeout=20,
-        )
+        try:
+            result = await self._post_to_node(
+                node=node,
+                path=f"/api/v1/sessions/{child_session}/error",
+                json_payload=payload,
+                timeout=20,
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                "[ClusterManager] dispatch error failed "
+                f"session_id={routed_session_id} node={node.get('node_name')} "
+                f"error_reason={error_reason} {diag_label(e)}: {e}"
+            )
+            raise
         node_id = int(node.get("id") or 0)
         adjust_node_id = await self._mark_dispatch_session_finished(routed_session_id, fallback_node_id=node_id)
         if adjust_node_id:
@@ -171,7 +192,9 @@ class ClusterManager:
                     await self._release_dispatch_slot(node_id)
                     last_error = str(e)
                     await self.db.mark_cluster_node_error(int(node["id"]), last_error, error_type="dispatch")
-                    debug_logger.log_warning(f"[ClusterManager] dispatch custom-score node={node['node_name']} failed: {last_error}")
+                    debug_logger.log_warning(
+                        f"[ClusterManager] dispatch custom-score node={node['node_name']} {diag_label(e)} failed: {last_error}"
+                    )
 
             if dispatched_this_round and last_error:
                 debug_logger.log_warning(
@@ -187,25 +210,37 @@ class ClusterManager:
         reported_browser_count = self._as_positive_int(payload.get("browser_count"), effective_capacity)
         reported_node_max = self._as_positive_int(payload.get("node_max_concurrency"), effective_capacity)
 
-        node = await self.db.upsert_cluster_node(
-            node_name=payload["node_name"],
-            base_url=payload["base_url"],
-            node_api_key=payload["node_api_key"],
-            weight=int(payload.get("weight") or 100),
-            max_concurrency=effective_capacity,
-            reported_browser_count=reported_browser_count,
-            reported_node_max_concurrency=reported_node_max,
-            active_sessions=int(payload.get("active_sessions") or 0),
-            cached_sessions=int(payload.get("cached_sessions") or 0),
-            healthy=bool(payload.get("healthy", True)),
-        )
-        await self.db.record_cluster_node_heartbeat(
-            node_id=int(node["id"]),
-            event_type="register",
-            payload=payload,
-            healthy=bool(payload.get("healthy", True)),
-            reason=str(payload.get("reason") or "") or None,
-        )
+        try:
+            node = await self.db.upsert_cluster_node(
+                node_name=payload["node_name"],
+                base_url=payload["base_url"],
+                node_api_key=payload["node_api_key"],
+                weight=int(payload.get("weight") or 100),
+                max_concurrency=effective_capacity,
+                reported_browser_count=reported_browser_count,
+                reported_node_max_concurrency=reported_node_max,
+                active_sessions=int(payload.get("active_sessions") or 0),
+                cached_sessions=int(payload.get("cached_sessions") or 0),
+                healthy=bool(payload.get("healthy", True)),
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                "[ClusterManager] register node persist failed "
+                f"node={payload.get('node_name')} base_url={payload.get('base_url')} {diag_label(e)}: {e}"
+            )
+            raise
+        try:
+            await self.db.record_cluster_node_heartbeat(
+                node_id=int(node["id"]),
+                event_type="register",
+                payload=payload,
+                healthy=bool(payload.get("healthy", True)),
+                reason=str(payload.get("reason") or "") or None,
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                f"[ClusterManager] record register heartbeat failed node={node.get('node_name')} {diag_label(e)}: {e}"
+            )
         return {
             "success": True,
             "node": node,
@@ -220,28 +255,40 @@ class ClusterManager:
         reported_browser_count = self._as_positive_int(payload.get("browser_count"), effective_capacity)
         reported_node_max = self._as_positive_int(payload.get("node_max_concurrency"), effective_capacity)
 
-        node = await self.db.heartbeat_cluster_node(
-            node_name=payload["node_name"],
-            base_url=payload["base_url"],
-            max_concurrency=effective_capacity,
-            reported_browser_count=reported_browser_count,
-            reported_node_max_concurrency=reported_node_max,
-            active_sessions=int(payload.get("active_sessions") or 0),
-            cached_sessions=int(payload.get("cached_sessions") or 0),
-            healthy=bool(payload.get("healthy", True)),
-        )
+        try:
+            node = await self.db.heartbeat_cluster_node(
+                node_name=payload["node_name"],
+                base_url=payload["base_url"],
+                max_concurrency=effective_capacity,
+                reported_browser_count=reported_browser_count,
+                reported_node_max_concurrency=reported_node_max,
+                active_sessions=int(payload.get("active_sessions") or 0),
+                cached_sessions=int(payload.get("cached_sessions") or 0),
+                healthy=bool(payload.get("healthy", True)),
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                "[ClusterManager] heartbeat persist failed "
+                f"node={payload.get('node_name')} base_url={payload.get('base_url')} {diag_label(e)}: {e}"
+            )
+            raise
         if not node:
             return {
                 "success": False,
                 "message": "node_not_registered",
             }
-        await self.db.record_cluster_node_heartbeat(
-            node_id=int(node["id"]),
-            event_type="heartbeat",
-            payload=payload,
-            healthy=bool(payload.get("healthy", True)),
-            reason=str(payload.get("reason") or "") or None,
-        )
+        try:
+            await self.db.record_cluster_node_heartbeat(
+                node_id=int(node["id"]),
+                event_type="heartbeat",
+                payload=payload,
+                healthy=bool(payload.get("healthy", True)),
+                reason=str(payload.get("reason") or "") or None,
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                f"[ClusterManager] record heartbeat failed node={node.get('node_name')} {diag_label(e)}: {e}"
+            )
         return {
             "success": True,
             "node": node,
@@ -629,7 +676,7 @@ class ClusterManager:
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                debug_logger.log_warning(f"[ClusterManager] heartbeat error: {e}")
+                debug_logger.log_warning(f"[ClusterManager] heartbeat error {diag_label(e)}: {e}")
 
             await asyncio.sleep(config.cluster_heartbeat_interval_seconds)
 
@@ -713,16 +760,22 @@ class ClusterManager:
         register_url = f"{master_base}/api/cluster/register"
         hb_url = f"{master_base}/api/cluster/heartbeat"
 
-        register_status, _, register_text = await asyncio.to_thread(
-            self._sync_json_http_request,
-            "POST",
-            register_url,
-            headers,
-            register_payload,
-            20,
-        )
-        if register_status >= 400:
-            raise RuntimeError(f"register failed: {register_status}, {(register_text or '')[:200]}")
+        if not self._subnode_registered:
+            register_status, _, register_text = await asyncio.to_thread(
+                self._sync_json_http_request,
+                "POST",
+                register_url,
+                headers,
+                register_payload,
+                20,
+            )
+            if register_status >= 400:
+                raise RuntimeError(f"register failed: {register_status}, {(register_text or '')[:200]}")
+            self._subnode_registered = True
+            debug_logger.log_info(
+                f"[ClusterManager] subnode register success node={config.node_name} base_url={public_base_url}"
+            )
+            return
 
         hb_status, _, hb_text = await asyncio.to_thread(
             self._sync_json_http_request,
@@ -732,6 +785,27 @@ class ClusterManager:
             heartbeat_payload,
             20,
         )
+        if hb_status == 404 and "node_not_registered" in str(hb_text or ""):
+            self._subnode_registered = False
+            debug_logger.log_warning(
+                f"[ClusterManager] heartbeat reported node_not_registered, will re-register node={config.node_name}"
+            )
+            register_status, _, register_text = await asyncio.to_thread(
+                self._sync_json_http_request,
+                "POST",
+                register_url,
+                headers,
+                register_payload,
+                20,
+            )
+            if register_status >= 400:
+                raise RuntimeError(f"register failed: {register_status}, {(register_text or '')[:200]}")
+            self._subnode_registered = True
+            debug_logger.log_info(
+                f"[ClusterManager] subnode re-register success node={config.node_name} base_url={public_base_url}"
+            )
+            return
+
         if hb_status >= 400:
             raise RuntimeError(f"heartbeat failed: {hb_status}, {(hb_text or '')[:200]}")
 
