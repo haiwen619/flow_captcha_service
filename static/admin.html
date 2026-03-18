@@ -787,6 +787,46 @@
     .toast.err{background:#dc2626}
     .action-row{display:flex;gap:6px;flex-wrap:wrap}
     .inline-note{margin-top:10px;font-size:12px;color:#64748b;line-height:1.7}
+    .table-mini-input{
+      width:96px;
+      min-width:0;
+      padding:7px 9px;
+      border:1px solid #d7e3f2;
+      border-radius:10px;
+      background:#fff;
+      font-size:12px;
+    }
+    .table-mini-input.quota-delta{width:88px}
+    .table-pass-input{width:140px}
+    .cell-stack{display:grid;gap:2px}
+    .cell-main{font-weight:700;color:#0f172a}
+    .cell-sub{font-size:12px;color:#64748b}
+    .quota-badge{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-width:66px;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid #cfe0f5;
+      background:#f8fbff;
+      color:#0f172a;
+      font-size:12px;
+      font-weight:700;
+    }
+    .batch-toolbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:12px;
+      padding:12px 14px;
+      border:1px solid #dbe7f5;
+      border-radius:14px;
+      background:linear-gradient(180deg,#fbfdff,#f6faff);
+    }
+    .batch-toolbar .actions{margin-top:0}
     .pager{
       margin-top:12px;
       display:flex;
@@ -1627,11 +1667,18 @@
               <div class="actions"><button id="refreshUsersBtn" class="secondary">刷新用户</button></div>
             </div>
           </div>
-          <div class="inline-note">密码留空表示不修改。次数按绝对值保存，便于直接修正账号状态。</div>
-          <div class="table-toolbar">
-            <div class="toolbar-note">适合快速修正用户启用状态、配额和密码，不需要切换到单独详情页。</div>
+          <div class="inline-note">默认按表格浏览，只保留启用、密码重置和加次数操作，避免整屏输入框影响阅读。</div>
+          <div class="batch-toolbar">
+            <div class="toolbar-note">勾选多名用户后，可一次性给选中账号统一增加次数。</div>
+            <div class="actions">
+              <input id="usersBatchQuotaDelta" class="table-mini-input quota-delta" type="number" value="100" min="1" />
+              <button id="applyUsersBatchQuotaBtn" class="secondary" type="button">批量添加次数</button>
+            </div>
           </div>
-          <div class="table-wrap"><table><thead><tr><th>ID</th><th>账号</th><th>显示名</th><th>新密码</th><th>注册位置</th><th>启用</th><th>剩余次数</th><th>已用次数</th><th>最后登录</th><th>操作</th></tr></thead><tbody id="portalUsersTable"></tbody></table></div>
+          <div class="table-toolbar">
+            <div class="toolbar-note">支持单用户加次数和批量加次数；密码留空表示不修改。</div>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th><input id="usersSelectAll" type="checkbox" /></th><th>ID</th><th>账号</th><th>显示名</th><th>注册位置</th><th>启用</th><th>剩余次数</th><th>已用次数</th><th>添加次数</th><th>重置密码</th><th>最后登录</th><th>操作</th></tr></thead><tbody id="portalUsersTable"></tbody></table></div>
         </section>
       </div>
 
@@ -1741,6 +1788,7 @@
         token: "",
         role: "unknown",
         page: "overview",
+        portalUsers: [],
         clusterNodes: [],
         clusterSearch: "",
         clusterHealthFilter: "all",
@@ -2229,17 +2277,19 @@
         if (state.role !== "master") return;
         const r = await req("/api/admin/users");
         const items = Array.isArray(r.items) ? r.items : [];
+        state.portalUsers = items;
         const b = q("portalUsersTable"); b.innerHTML = "";
         for (const it of items) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${it.id}</td><td><input data-user-id="${it.id}" data-user-key="username" value="${esc(it.username || "")}" /></td><td><input data-user-id="${it.id}" data-user-key="display_name" value="${esc(it.display_name || "")}" /></td><td><input type="password" data-user-id="${it.id}" data-user-key="new_password" placeholder="留空不修改" /></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><input data-user-id="${it.id}" data-user-key="quota_remaining" value="${it.quota_remaining ?? 0}" /></td><td><input data-user-id="${it.id}" data-user-key="quota_used" value="${it.quota_used ?? 0}" /></td><td>${it.last_login_at || "-"}</td><td><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button></td>`;
+          tr.innerHTML = `<td><input type="checkbox" data-user-select="1" data-user-id="${it.id}" /></td><td>${it.id}</td><td><div class="cell-stack"><span class="cell-main">${esc(it.username || "-")}</span></div></td><td><div class="cell-stack"><span class="cell-main">${esc(it.display_name || "-")}</span></div></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="quota-badge">${it.quota_remaining ?? 0}</span></td><td><span class="quota-badge">${it.quota_used ?? 0}</span></td><td><input class="table-mini-input quota-delta" type="number" min="0" value="0" data-user-id="${it.id}" data-user-key="quota_remaining_delta" /></td><td><input class="table-mini-input table-pass-input" type="password" data-user-id="${it.id}" data-user-key="new_password" placeholder="留空不修改" /></td><td>${it.last_login_at || "-"}</td><td><div class="action-row"><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button></div></td>`;
           b.appendChild(tr);
         }
         if (!items.length) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td colspan="10" style="text-align:center;color:#64748b;padding:16px 8px">暂无用户记录</td>`;
+          tr.innerHTML = `<td colspan="12" style="text-align:center;color:#64748b;padding:16px 8px">暂无用户记录</td>`;
           b.appendChild(tr);
         }
+        q("usersSelectAll").checked = false;
         q("usersTableStat").textContent = `用户数 ${items.length}`;
       };
       const loadPortalCdks = async () => {
@@ -2480,6 +2530,29 @@
       q("logoutBtn").addEventListener("click", performLogout);
       q("sidebarLogoutBtn").addEventListener("click", performLogout);
       q("refreshAllBtn").addEventListener("click", async () => { try { await loadAll(); showNotice("全部数据已刷新。", "ok"); } catch (err) { showNotice(`刷新失败：${err.message}`, "err"); } });
+      q("usersSelectAll").addEventListener("change", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement)) return;
+        document.querySelectorAll('input[data-user-select="1"]').forEach((el) => {
+          if (el instanceof HTMLInputElement) el.checked = target.checked;
+        });
+      });
+      q("applyUsersBatchQuotaBtn").addEventListener("click", async () => {
+        try {
+          const delta = toInt(q("usersBatchQuotaDelta").value, 0);
+          if (delta <= 0) throw new Error("批量添加次数必须大于 0。");
+          const ids = Array.from(document.querySelectorAll('input[data-user-select="1"]:checked'))
+            .map((el) => Number(el.getAttribute("data-user-id")))
+            .filter((id) => Number.isFinite(id) && id > 0);
+          if (!ids.length) throw new Error("请先勾选至少 1 个用户。");
+          for (const id of ids) {
+            await req(`/api/admin/users/${id}`, { method: "PATCH", body: { quota_remaining_delta: delta } });
+          }
+          await loadPortalUsers();
+          await loadStats();
+          showNotice(`已为 ${ids.length} 个用户批量增加 ${delta} 次。`, "ok");
+        } catch (err) { showNotice(`批量添加次数失败：${err.message}`, "err"); }
+      });
       q("refreshLogsBtn").addEventListener("click", async () => {
         try {
           state.logs.offset = 0;
@@ -2724,21 +2797,15 @@
         if (target.dataset.action === "save-user") {
           const id = Number(target.dataset.id);
           try {
-            const usernameEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="username"]`);
-            const displayNameEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="display_name"]`);
             const passwordEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="new_password"]`);
             const enabledEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="enabled"]`);
-            const quotaRemainingEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="quota_remaining"]`);
-            const quotaUsedEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="quota_used"]`);
+            const quotaDeltaEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="quota_remaining_delta"]`);
             await req(`/api/admin/users/${id}`, {
               method: "PATCH",
               body: {
-                username: String(usernameEl?.value || "").trim() || null,
-                display_name: String(displayNameEl?.value || "").trim() || null,
                 new_password: String(passwordEl?.value || "").trim() || null,
                 enabled: !!enabledEl?.checked,
-                quota_remaining: toInt(quotaRemainingEl?.value, 0),
-                quota_used: toInt(quotaUsedEl?.value, 0),
+                quota_remaining_delta: toInt(quotaDeltaEl?.value, 0),
               },
             });
             await loadPortalUsers();

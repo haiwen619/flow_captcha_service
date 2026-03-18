@@ -84,6 +84,7 @@
 
         <nav class="app-nav">
           <button class="nav-btn active" type="button" data-page="dashboard"><span class="nav-main">概览</span><span class="nav-meta">查看次数、成功率和最近兑换</span></button>
+          <button class="nav-btn" type="button" data-page="leaderboard"><span class="nav-main">排行榜</span><span class="nav-meta">单独查看当前站点用户使用排行</span></button>
           <button class="nav-btn" type="button" data-page="apiKeys"><span class="nav-main">API Key</span><span class="nav-meta">申请、复制和管理个人密钥</span></button>
           <button class="nav-btn" type="button" data-page="redeem"><span class="nav-main">充值中心</span><span class="nav-meta">兑换 CDK 并查看余额变动</span></button>
           <button class="nav-btn" type="button" data-page="logs"><span class="nav-main">调用记录</span><span class="nav-meta">回看接口调用状态与失败原因</span></button>
@@ -161,13 +162,17 @@
           </div>
         </section>
 
-        <section class="content-card">
-          <div class="section-head compact">
-            <div>
-              <div class="section-eyebrow">排行榜</div>
-              <h2>使用排行榜</h2>
-            </div>
+        </section>
+
+        <section id="pageLeaderboard" class="page">
+        <div class="section-head">
+          <div>
+            <div class="section-eyebrow">排行榜</div>
+            <h2>使用排行榜</h2>
           </div>
+        </div>
+
+        <section class="content-card">
           <div class="table-wrap">
             <table>
               <thead>

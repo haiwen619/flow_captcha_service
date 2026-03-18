@@ -38,6 +38,12 @@ const pageMetaMap = {
     desc: "集中查看当前账号的剩余次数、调用成功率和最近一次充值结果。",
     shortTitle: "概览",
   },
+  leaderboard: {
+    eyebrow: "排行榜",
+    title: "站点使用排行榜",
+    desc: "单独查看当前站点内用户请求量、成功数、近 7 天活跃度和已用额度排行。",
+    shortTitle: "排行榜",
+  },
   apiKeys: {
     eyebrow: "API Key",
     title: "个人 API Key 工作区",
@@ -284,7 +290,7 @@ function switchPage(page) {
   document.querySelectorAll(".nav-btn").forEach((button) => {
     button.classList.toggle("active", button.dataset.page === page);
   });
-  ["dashboard", "apiKeys", "redeem", "logs", "account"].forEach((name) => {
+  ["dashboard", "leaderboard", "apiKeys", "redeem", "logs", "account"].forEach((name) => {
     dom.byId(`page${name.charAt(0).toUpperCase()}${name.slice(1)}`)?.classList.toggle("active", name === page);
   });
   const meta = pageMetaMap[page] || pageMetaMap.dashboard;
