@@ -1489,6 +1489,22 @@
             <div class="field"><label>会话保留时长（秒）</label><input id="cfgSessionTtl" type="number" min="120" /></div>
           </div>
 
+          <div class="grid">
+            <label class="checkbox-line"><input id="cfgOidcEnabled" type="checkbox" /> 启用门户 OAuth2 / OIDC 登录</label>
+            <label class="checkbox-line"><input id="cfgOauthOnly" type="checkbox" /> 仅允许 OAuth / OIDC 登录</label>
+          </div>
+          <div class="grid">
+            <div class="field"><label>OIDC 基础地址</label><input id="cfgOidcBaseUrl" placeholder="https://sso.example.com" /><div class="hint">系统会按固定路径拼接 `/oauth/authorize`、`/oauth/token`、`/oauth/userinfo`。</div></div>
+            <div class="field"><label>Client ID</label><input id="cfgOidcClientId" placeholder="client_id" /></div>
+            <div class="field"><label>Client Secret</label><input id="cfgOidcClientSecret" type="password" placeholder="client_secret" /></div>
+            <div class="field"><label>Scope</label><input id="cfgOidcScope" placeholder="openid profile email" /></div>
+          </div>
+          <div class="grid">
+            <div class="field"><label>注册赠送额度</label><input id="cfgRegisterBonusQuota" type="number" min="0" /><div class="hint">本地注册和首次 OIDC 自动建号都会赠送。</div></div>
+            <div class="field"><label>签到最小奖励</label><input id="cfgCheckinMinQuota" type="number" min="0" /></div>
+            <div class="field"><label>签到最大奖励</label><input id="cfgCheckinMaxQuota" type="number" min="0" /><div class="hint">用户每天签到一次，在该范围内随机赠送。</div></div>
+          </div>
+
           <div id="masterConfigPanel" class="hidden">
             <div class="grid">
               <div class="field"><label>子节点判定离线阈值（秒）</label><input id="cfgMasterNodeStale" type="number" min="10" /><div class="hint">超过该时长未心跳，主节点视其不可用。</div></div>
@@ -2027,6 +2043,15 @@
         q("cfgServerHost").value = cfg.server?.host || "";
         q("cfgServerPort").value = cfg.server?.port ?? 8060;
         q("cfgLogLevel").value = cfg.log?.level || "INFO";
+        q("cfgOidcEnabled").checked = !!cfg.portal?.oidc_enabled;
+        q("cfgOauthOnly").checked = !!cfg.portal?.oauth_only;
+        q("cfgOidcBaseUrl").value = cfg.portal?.oidc_base_url || "";
+        q("cfgOidcClientId").value = cfg.portal?.oidc_client_id || "";
+        q("cfgOidcClientSecret").value = cfg.portal?.oidc_client_secret || "";
+        q("cfgOidcScope").value = cfg.portal?.oidc_scope || "openid profile email";
+        q("cfgRegisterBonusQuota").value = cfg.portal?.register_bonus_quota ?? 0;
+        q("cfgCheckinMinQuota").value = cfg.portal?.checkin_min_quota ?? 0;
+        q("cfgCheckinMaxQuota").value = cfg.portal?.checkin_max_quota ?? 0;
         q("cfgFlowTimeout").value = cfg.captcha?.flow_timeout ?? 300;
         q("cfgUpsampleTimeout").value = cfg.captcha?.upsample_timeout ?? 300;
         q("cfgSessionTtl").value = cfg.captcha?.session_ttl_seconds ?? 1200;
@@ -2065,6 +2090,17 @@
         const payload = {
           server: { host: q("cfgServerHost").value.trim(), port: toInt(q("cfgServerPort").value, 8060) },
           storage: { db_path: q("cfgDbPath").value.trim() },
+          portal: {
+            oidc_enabled: q("cfgOidcEnabled").checked,
+            oauth_only: q("cfgOauthOnly").checked,
+            oidc_base_url: q("cfgOidcBaseUrl").value.trim(),
+            oidc_client_id: q("cfgOidcClientId").value.trim(),
+            oidc_client_secret: q("cfgOidcClientSecret").value.trim(),
+            oidc_scope: q("cfgOidcScope").value.trim() || "openid profile email",
+            register_bonus_quota: toInt(q("cfgRegisterBonusQuota").value, 0),
+            checkin_min_quota: toInt(q("cfgCheckinMinQuota").value, 0),
+            checkin_max_quota: toInt(q("cfgCheckinMaxQuota").value, 0),
+          },
           captcha: {
             node_name: q("cfgNodeName").value.trim(),
             flow_timeout: toInt(q("cfgFlowTimeout").value, 300),
@@ -2455,7 +2491,9 @@
       q("dashboardNav").addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
-        const page = target.dataset.page;
+        const navTab = target.closest(".nav-tab[data-page]");
+        if (!(navTab instanceof HTMLElement)) return;
+        const page = navTab.dataset.page;
         if (!page) return;
         setActivePage(page);
       });
@@ -2523,6 +2561,23 @@
       q("saveSystemBtn").addEventListener("click", async () => {
         try {
           const payload = collectSystemPayload();
+          if (payload.portal?.oidc_enabled) {
+            const mustHave = [
+              ["OIDC 基础地址", payload.portal.oidc_base_url],
+              ["OIDC Client ID", payload.portal.oidc_client_id],
+              ["OIDC Client Secret", payload.portal.oidc_client_secret],
+            ];
+            const missing = mustHave.filter((x) => !String(x[1] || "").trim()).map((x) => x[0]);
+            if (missing.length > 0) {
+              throw new Error(`OIDC 配置缺失：${missing.join("、")}`);
+            }
+          }
+          if (payload.portal?.oauth_only && !payload.portal?.oidc_enabled) {
+            throw new Error("仅 OAuth 登录开启时，必须同时启用 OIDC 登录。");
+          }
+          if ((payload.portal?.checkin_max_quota ?? 0) < (payload.portal?.checkin_min_quota ?? 0)) {
+            throw new Error("签到最大奖励不能小于签到最小奖励。");
+          }
           if (payload.cluster?.role === "subnode") {
             const mustHave = [
               ["主节点地址", payload.cluster.master_base_url],

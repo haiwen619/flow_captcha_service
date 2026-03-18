@@ -132,6 +132,7 @@ class UpdateSystemConfigRequest(BaseModel):
     server: Optional[Dict[str, Any]] = None
     storage: Optional[Dict[str, Any]] = None
     admin: Optional[Dict[str, Any]] = None
+    portal: Optional[Dict[str, Any]] = None
     captcha: Optional[Dict[str, Any]] = None
     log: Optional[Dict[str, Any]] = None
     cluster: Optional[Dict[str, Any]] = None

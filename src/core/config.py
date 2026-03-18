@@ -69,7 +69,7 @@ def _positive_int_or_fallback(value: Any, fallback: int) -> int:
     return number
 
 class Config:
-    ORDERED_TOP_SECTIONS = ("server", "storage", "admin", "captcha", "log", "cluster")
+    ORDERED_TOP_SECTIONS = ("server", "storage", "admin", "portal", "captcha", "log", "cluster")
     ENV_OVERRIDE_KEYS = (
         "FCS_CONFIG_FILE",
         "FCS_SERVER_HOST",
@@ -143,6 +143,17 @@ class Config:
             "admin": {
                 "username": "admin",
                 "password": "admin",
+            },
+            "portal": {
+                "oidc_enabled": False,
+                "oidc_base_url": "",
+                "oidc_client_id": "",
+                "oidc_client_secret": "",
+                "oidc_scope": "openid profile email",
+                "oauth_only": False,
+                "register_bonus_quota": 0,
+                "checkin_min_quota": 0,
+                "checkin_max_quota": 0,
             },
             "captcha": {
                 "browser_count": 1,
@@ -297,6 +308,52 @@ class Config:
     @property
     def admin_password(self) -> str:
         return str(os.getenv("FCS_ADMIN_PASSWORD", self._get("admin", "password", "admin")))
+
+    @property
+    def portal_oidc_enabled(self) -> bool:
+        return _as_bool(self._get("portal", "oidc_enabled", False), False)
+
+    @property
+    def portal_oidc_base_url(self) -> str:
+        return str(self._get("portal", "oidc_base_url", "")).strip().rstrip("/")
+
+    @property
+    def portal_oidc_client_id(self) -> str:
+        return str(self._get("portal", "oidc_client_id", "")).strip()
+
+    @property
+    def portal_oidc_client_secret(self) -> str:
+        return str(self._get("portal", "oidc_client_secret", "")).strip()
+
+    @property
+    def portal_oidc_scope(self) -> str:
+        scope = str(self._get("portal", "oidc_scope", "openid profile email")).strip()
+        return scope or "openid profile email"
+
+    @property
+    def portal_oauth_only(self) -> bool:
+        return _as_bool(self._get("portal", "oauth_only", False), False)
+
+    @property
+    def portal_register_bonus_quota(self) -> int:
+        try:
+            return max(0, int(self._get("portal", "register_bonus_quota", 0)))
+        except Exception:
+            return 0
+
+    @property
+    def portal_checkin_min_quota(self) -> int:
+        try:
+            return max(0, int(self._get("portal", "checkin_min_quota", 0)))
+        except Exception:
+            return 0
+
+    @property
+    def portal_checkin_max_quota(self) -> int:
+        try:
+            return max(0, int(self._get("portal", "checkin_max_quota", 0)))
+        except Exception:
+            return 0
 
     @property
     def browser_launch_background(self) -> bool:

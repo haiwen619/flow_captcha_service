@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import random
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -380,6 +381,20 @@ class Database:
 
             await db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS portal_user_checkins (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    portal_user_id INTEGER NOT NULL,
+                    checkin_date TEXT NOT NULL,
+                    quota_granted INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(portal_user_id) REFERENCES portal_users(id),
+                    UNIQUE(portal_user_id, checkin_date)
+                )
+                """
+            )
+
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS cluster_settings (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     cluster_key TEXT NOT NULL,
@@ -455,6 +470,7 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_transactions_user_created ON portal_user_transactions(portal_user_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_jobs_user_created ON portal_user_jobs(portal_user_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_jobs_status ON portal_user_jobs(status)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_checkins_user_date ON portal_user_checkins(portal_user_id, checkin_date DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_jobs_portal_user_created ON captcha_jobs(portal_user_id, created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_session_quota_events_session ON session_quota_events(session_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_service_api_keys_enabled ON service_api_keys(enabled)")
@@ -699,6 +715,7 @@ class Database:
         password: str,
         register_location: str,
         display_name: Optional[str] = None,
+        initial_quota: int = 0,
     ) -> tuple[bool, str, Optional[Dict[str, Any]]]:
         normalized_username = str(username or "").strip()
         normalized_location = str(register_location or "").strip()
@@ -720,8 +737,27 @@ class Database:
                 (normalized_username, normalized_display_name, self._hash_secret(password), normalized_location),
             )
             user_id = int(cursor.lastrowid or 0)
+            if int(initial_quota or 0) > 0:
+                await db.execute(
+                    """
+                    UPDATE portal_users
+                    SET quota_remaining = quota_remaining + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (int(initial_quota), user_id),
+                )
             await db.commit()
 
+        if int(initial_quota or 0) > 0:
+            user = await self.get_portal_user(user_id)
+            await self.create_portal_user_transaction(
+                portal_user_id=user_id,
+                change_amount=int(initial_quota),
+                balance_after=int(user.get("quota_remaining") or 0) if user else int(initial_quota),
+                source_type="register_bonus",
+                source_ref=str(user_id),
+                note="注册赠送额度",
+            )
         return True, "注册成功", await self.get_portal_user(user_id)
 
     async def verify_portal_user_credentials(self, username: str, password: str) -> Optional[Dict[str, Any]]:
@@ -1377,6 +1413,18 @@ class Database:
             )
             latest_session = await cursor.fetchone()
 
+            cursor = await db.execute(
+                """
+                SELECT checkin_date, quota_granted, created_at
+                FROM portal_user_checkins
+                WHERE portal_user_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            latest_checkin = await cursor.fetchone()
+
         solve_success_total = int(summary["solve_success_total"] or 0)
         solve_failed_total = int(summary["solve_failed_total"] or 0)
         solve_total = solve_success_total + solve_failed_total
@@ -1396,8 +1444,148 @@ class Database:
                 "latest_session_id": latest_session["session_id"] if latest_session else None,
                 "success_rate": round((solve_success_total / solve_total) * 100, 2) if solve_total > 0 else 0.0,
                 "top_projects": top_projects,
+                "latest_checkin": dict(latest_checkin) if latest_checkin else None,
             },
         }
+
+    async def get_portal_user_checkin_status(self, user_id: int) -> Dict[str, Any]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT checkin_date, quota_granted, created_at
+                FROM portal_user_checkins
+                WHERE portal_user_id = ? AND checkin_date = date('now', 'localtime')
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            today = await cursor.fetchone()
+        return {
+            "checked_in_today": bool(today),
+            "today_reward": int(today["quota_granted"] or 0) if today else 0,
+            "checkin_date": today["checkin_date"] if today else None,
+            "checked_in_at": today["created_at"] if today else None,
+        }
+
+    async def claim_portal_user_checkin(self, user_id: int, min_quota: int, max_quota: int) -> Tuple[bool, str, Dict[str, Any]]:
+        safe_min = max(0, int(min_quota or 0))
+        safe_max = max(safe_min, int(max_quota or 0))
+        if safe_max <= 0:
+            return False, "当前未开启签到奖励", {"granted_quota": 0}
+
+        granted_quota = random.randint(safe_min, safe_max)
+        async with self._write_connect() as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT enabled, quota_remaining FROM portal_users WHERE id = ?",
+                    (user_id,),
+                )
+                user = await cursor.fetchone()
+                if not user:
+                    await db.execute("ROLLBACK")
+                    return False, "用户不存在", {"granted_quota": 0}
+                if not bool(user["enabled"]):
+                    await db.execute("ROLLBACK")
+                    return False, "用户已禁用", {"granted_quota": 0}
+
+                cursor = await db.execute(
+                    """
+                    INSERT OR IGNORE INTO portal_user_checkins (portal_user_id, checkin_date, quota_granted)
+                    VALUES (?, date('now', 'localtime'), ?)
+                    """,
+                    (user_id, granted_quota),
+                )
+                if int(cursor.rowcount or 0) <= 0:
+                    cursor = await db.execute(
+                        """
+                        SELECT checkin_date, quota_granted, created_at
+                        FROM portal_user_checkins
+                        WHERE portal_user_id = ? AND checkin_date = date('now', 'localtime')
+                        LIMIT 1
+                        """,
+                        (user_id,),
+                    )
+                    existing = await cursor.fetchone()
+                    await db.execute("ROLLBACK")
+                    return False, "今天已经签到过了", {
+                        "granted_quota": int(existing["quota_granted"] or 0) if existing else 0,
+                        "checkin_date": existing["checkin_date"] if existing else None,
+                        "checked_in_at": existing["created_at"] if existing else None,
+                    }
+
+                await db.execute(
+                    """
+                    UPDATE portal_users
+                    SET quota_remaining = quota_remaining + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (granted_quota, user_id),
+                )
+                cursor = await db.execute("SELECT quota_remaining FROM portal_users WHERE id = ?", (user_id,))
+                updated_user = await cursor.fetchone()
+                balance_after = int(updated_user["quota_remaining"] or 0) if updated_user else granted_quota
+                await db.execute(
+                    """
+                    INSERT INTO portal_user_transactions (portal_user_id, change_amount, balance_after, source_type, source_ref, note)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, granted_quota, balance_after, "daily_checkin", None, "每日签到奖励"),
+                )
+                await db.commit()
+                return True, "签到成功", {
+                    "granted_quota": granted_quota,
+                    "balance_after": balance_after,
+                    "checkin_date": None,
+                    "checked_in_at": None,
+                }
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    async def get_portal_usage_leaderboard(self, limit: int = 10) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit or 10), 50))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                    u.id,
+                    u.username,
+                    u.display_name,
+                    u.quota_used,
+                    COUNT(m.status) AS request_total,
+                    SUM(CASE WHEN m.status = 'finish:success' THEN 1 ELSE 0 END) AS solve_success_total,
+                    SUM(CASE WHEN m.created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS recent_7d_total
+                FROM portal_users u
+                LEFT JOIN (
+                    SELECT portal_user_id, status, created_at FROM portal_user_jobs
+                    UNION ALL
+                    SELECT portal_user_id, status, created_at FROM captcha_jobs WHERE portal_user_id IS NOT NULL
+                ) m ON m.portal_user_id = u.id
+                WHERE u.enabled = 1
+                GROUP BY u.id, u.username, u.display_name, u.quota_used
+                ORDER BY request_total DESC, solve_success_total DESC, u.quota_used DESC, u.id ASC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            )
+            rows = await cursor.fetchall()
+            return [
+                {
+                    "rank": index + 1,
+                    "user_id": int(row["id"] or 0),
+                    "username": row["username"] or "",
+                    "display_name": row["display_name"] or row["username"] or "",
+                    "request_total": int(row["request_total"] or 0),
+                    "solve_success_total": int(row["solve_success_total"] or 0),
+                    "recent_7d_total": int(row["recent_7d_total"] or 0),
+                    "quota_used": int(row["quota_used"] or 0),
+                }
+                for index, row in enumerate(rows)
+            ]
 
     async def create_portal_cdks_batch(
         self,

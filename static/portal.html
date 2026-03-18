@@ -14,6 +14,7 @@
           <span class="brand-chip solid">用户中心</span>
           <h1>登录或注册</h1>
           <p class="auth-desc">首页只保留账号入口。登录后再查看 API Key、次数明细和调用记录。</p>
+          <p id="authModeHint" class="mini-hint hidden-block"></p>
         </div>
 
         <div id="guestAuthCard" class="auth-card">
@@ -36,6 +37,10 @@
               </label>
               <button class="btn primary wide" type="submit">登录账号</button>
             </form>
+            <div id="oidcLoginWrap" class="stack-form hidden-block">
+              <button id="oidcLoginBtn" class="btn ghost wide" type="button">使用 OAuth2 / OIDC 登录</button>
+              <p id="oidcLoginHint" class="mini-hint">已启用标准 OAuth2 / OIDC 登录。</p>
+            </div>
           </section>
 
           <section id="registerPane" class="auth-pane">
@@ -133,6 +138,17 @@
         <section class="content-card">
           <div class="section-head compact">
             <div>
+              <div class="section-eyebrow">每日签到</div>
+              <h2>签到奖励</h2>
+            </div>
+            <button id="checkinBtn" class="btn subtle" type="button">立即签到</button>
+          </div>
+          <div id="checkinNotice" class="notice info">今日还未签到。</div>
+        </section>
+
+        <section class="content-card">
+          <div class="section-head compact">
+            <div>
               <div class="section-eyebrow">最近兑换</div>
               <h2>最近一次兑换结果</h2>
             </div>
@@ -142,6 +158,25 @@
             <div class="summary-item"><span>兑换码</span><strong id="latestRedeemCode">--</strong></div>
             <div class="summary-item"><span>到账次数</span><strong id="latestRedeemQuota">--</strong></div>
             <div class="summary-item"><span>兑换时间</span><strong id="latestRedeemTime">--</strong></div>
+          </div>
+        </section>
+
+        <section class="content-card">
+          <div class="section-head compact">
+            <div>
+              <div class="section-eyebrow">排行榜</div>
+              <h2>使用排行榜</h2>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>排名</th><th>用户</th><th>请求数</th><th>成功数</th><th>近 7 天</th><th>已用额度</th></tr>
+              </thead>
+              <tbody id="leaderboardTableBody">
+                <tr><td colspan="6" class="empty-cell">暂无排行数据。</td></tr>
+              </tbody>
+            </table>
           </div>
         </section>
         </section>

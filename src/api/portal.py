@@ -1,10 +1,16 @@
 ﻿from __future__ import annotations
 
+import asyncio
+import json
+import secrets
 import time
 import urllib.parse
+import urllib.request
+from hashlib import sha256
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 
 from ..core.auth import (
     issue_portal_user_token,
@@ -36,6 +42,7 @@ router = APIRouter(prefix="/api/portal", tags=["portal"])
 _db: Optional[Database] = None
 _runtime: Optional[CaptchaRuntime] = None
 _cluster: Optional[ClusterManager] = None
+PORTAL_OIDC_STATE_COOKIE = "portal_oidc_state"
 
 
 def set_dependencies(db: Database, runtime: CaptchaRuntime, cluster_manager: ClusterManager):
@@ -48,6 +55,109 @@ def set_dependencies(db: Database, runtime: CaptchaRuntime, cluster_manager: Clu
 def _assert_portal_public_role(feature_name: str):
     if config.cluster_role == "subnode":
         raise HTTPException(status_code=400, detail=f"当前 subnode 角色不开放：{feature_name}")
+
+
+def _assert_local_portal_auth_enabled(feature_name: str):
+    if config.portal_oauth_only:
+        raise HTTPException(status_code=400, detail=f"当前仅允许 OAuth/OIDC 登录，已关闭：{feature_name}")
+
+
+def _get_oidc_settings() -> Dict[str, Any]:
+    base_url = config.portal_oidc_base_url
+    client_id = config.portal_oidc_client_id
+    client_secret = config.portal_oidc_client_secret
+    enabled = bool(config.portal_oidc_enabled and base_url and client_id and client_secret and config.cluster_role != "subnode")
+    return {
+        "enabled": enabled,
+        "base_url": base_url,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": config.portal_oidc_scope,
+        "authorization_url": f"{base_url}/oauth/authorize" if base_url else "",
+        "token_url": f"{base_url}/oauth/token" if base_url else "",
+        "userinfo_url": f"{base_url}/oauth/userinfo" if base_url else "",
+    }
+
+
+def _build_portal_redirect_uri(request: Request) -> str:
+    return f"{str(request.base_url).rstrip('/')}/api/portal/auth/oidc/callback"
+
+
+async def _oidc_http_request(
+    url: str,
+    method: str = "GET",
+    headers: Optional[Dict[str, str]] = None,
+    body: Optional[bytes] = None,
+) -> tuple[int, Any]:
+    req = urllib.request.Request(url=url, data=body, headers=headers or {}, method=method.upper())
+
+    def _send() -> tuple[int, str, str]:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return (
+                int(getattr(response, "status", 200)),
+                str(response.headers.get("Content-Type") or ""),
+                response.read().decode("utf-8", errors="replace"),
+            )
+
+    try:
+        status, content_type, text = await asyncio.to_thread(_send)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"OIDC 上游请求失败: {exc}")
+
+    lowered_content_type = content_type.lower()
+    if "application/json" in lowered_content_type:
+        try:
+            return status, json.loads(text or "{}")
+        except Exception:
+            raise HTTPException(status_code=502, detail="OIDC 上游返回了无效 JSON")
+    if "application/x-www-form-urlencoded" in lowered_content_type:
+        parsed = urllib.parse.parse_qs(text, keep_blank_values=True)
+        return status, {key: values[-1] if values else "" for key, values in parsed.items()}
+    return status, text
+
+
+def _build_oidc_portal_username(base_url: str, subject: str) -> str:
+    return f"oidc_{sha256(base_url.encode('utf-8')).hexdigest()[:8]}_{sha256(subject.encode('utf-8')).hexdigest()[:16]}"
+
+
+async def _login_portal_user(response: Response, user_id: int) -> str:
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    await _db.mark_portal_user_login(user_id)
+    token = issue_portal_user_token(user_id)
+    response.set_cookie("portal_session", token, path="/", samesite="lax", httponly=True)
+    return token
+
+
+async def _resolve_or_create_oidc_user(claims: Dict[str, Any], provider_base_url: str) -> Dict[str, Any]:
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+
+    subject = str(claims.get("sub") or "").strip()
+    if not subject:
+        raise HTTPException(status_code=502, detail="OIDC userinfo 缺少 sub")
+
+    username = _build_oidc_portal_username(provider_base_url, subject)
+    existing = await _db.get_portal_user_by_username(username)
+    if existing:
+        return await _db.get_portal_user(int(existing["id"])) or existing
+
+    display_name = (
+        str(claims.get("preferred_username") or "").strip()
+        or str(claims.get("name") or "").strip()
+        or str(claims.get("email") or "").strip()
+        or username
+    )
+    ok, message, user = await _db.create_portal_user(
+        username=username,
+        password=secrets.token_urlsafe(32),
+        register_location="oidc",
+        display_name=display_name,
+        initial_quota=config.portal_register_bonus_quota,
+    )
+    if not ok or not user:
+        raise HTTPException(status_code=409, detail=message or "OIDC 用户创建失败")
+    return user
 
 
 def _build_runtime_summary(runtime_stats: Dict[str, Any]) -> Dict[str, Any]:
@@ -193,6 +303,8 @@ async def _build_portal_user_workspace_payload(user_id: int) -> Dict[str, Any]:
     recent_redeems = await _db.list_portal_user_cdk_redeems(user_id=user_id, limit=12)
     recent_transactions = await _db.list_portal_user_transactions(portal_user_id=user_id, limit=20)
     api_keys = await _db.list_portal_user_api_keys(portal_user_id=user_id)
+    checkin = await _db.get_portal_user_checkin_status(user_id)
+    leaderboard = await _db.get_portal_usage_leaderboard(limit=10)
     return {
         "success": True,
         "user": summary["user"],
@@ -201,6 +313,8 @@ async def _build_portal_user_workspace_payload(user_id: int) -> Dict[str, Any]:
         "recent_redeems": recent_redeems,
         "recent_transactions": recent_transactions,
         "api_keys": api_keys,
+        "checkin": checkin,
+        "leaderboard": leaderboard,
     }
 
 
@@ -272,12 +386,14 @@ async def get_portal_overview(request: Request):
         },
         "capabilities": {
             "user_portal": config.cluster_role != "subnode",
-            "self_register": config.cluster_role != "subnode",
-            "user_login": config.cluster_role != "subnode",
+            "self_register": config.cluster_role != "subnode" and not config.portal_oauth_only,
+            "user_login": config.cluster_role != "subnode" and not config.portal_oauth_only,
+            "user_login_oidc": _get_oidc_settings()["enabled"],
             "cdk_redeem": config.cluster_role != "subnode",
             "subnode_status_page": config.cluster_role == "subnode",
             "api_console": True,
             "session_center": True,
+            "daily_checkin": config.portal_checkin_max_quota > 0,
             "public_cluster_board": config.cluster_role == "master",
             "actions": ["solve", "finish", "error", "custom-score"],
         },
@@ -291,6 +407,16 @@ async def get_portal_overview(request: Request):
             "dispatch_available": int(cluster_stats.get("total_idle_capacity") or 0) > 0,
         },
         "quickstart": _build_quickstart(base_url),
+        "auth": {
+            "oidc": {
+                "enabled": _get_oidc_settings()["enabled"],
+                "scope": _get_oidc_settings()["scope"],
+            },
+            "oauth_only": config.portal_oauth_only,
+            "register_bonus_quota": config.portal_register_bonus_quota,
+            "checkin_min_quota": config.portal_checkin_min_quota,
+            "checkin_max_quota": config.portal_checkin_max_quota,
+        },
     }
 
 
@@ -302,6 +428,7 @@ async def get_portal_summary(request: Request):
 @router.post("/auth/register")
 async def portal_user_register(request: PortalRegisterRequest, raw_request: Request, response: Response):
     _assert_portal_public_role("用户自注册")
+    _assert_local_portal_auth_enabled("用户自注册")
     if _db is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
 
@@ -314,13 +441,12 @@ async def portal_user_register(request: PortalRegisterRequest, raw_request: Requ
         password=request.password,
         register_location=register_location,
         display_name=request.display_name or request.username,
+        initial_quota=config.portal_register_bonus_quota,
     )
     if not ok or not user:
         raise HTTPException(status_code=409, detail=message)
 
-    await _db.mark_portal_user_login(int(user["id"]))
-    token = issue_portal_user_token(int(user["id"]))
-    response.set_cookie("portal_session", token, path="/", samesite="lax", httponly=True)
+    token = await _login_portal_user(response, int(user["id"]))
     payload = await _build_portal_user_workspace_payload(int(user["id"]))
     return {
         "success": True,
@@ -335,6 +461,7 @@ async def portal_user_register(request: PortalRegisterRequest, raw_request: Requ
 @router.post("/auth/login")
 async def portal_user_login(request: LoginRequest, response: Response):
     _assert_portal_public_role("用户登录")
+    _assert_local_portal_auth_enabled("用户名密码登录")
     if _db is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
 
@@ -342,9 +469,7 @@ async def portal_user_login(request: LoginRequest, response: Response):
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-    await _db.mark_portal_user_login(int(user["id"]))
-    token = issue_portal_user_token(int(user["id"]))
-    response.set_cookie("portal_session", token, path="/", samesite="lax", httponly=True)
+    token = await _login_portal_user(response, int(user["id"]))
     payload = await _build_portal_user_workspace_payload(int(user["id"]))
     return {
         "success": True,
@@ -352,6 +477,86 @@ async def portal_user_login(request: LoginRequest, response: Response):
         "authenticated": True,
         "token": token,
     }
+
+
+@router.get("/auth/oidc")
+@router.get("/auth/oidc/start")
+async def portal_oidc_start(request: Request):
+    _assert_portal_public_role("OIDC 登录")
+    settings = _get_oidc_settings()
+    if not settings["enabled"]:
+        raise HTTPException(status_code=400, detail="当前未启用 OIDC 登录")
+
+    state_value = secrets.token_urlsafe(24)
+    query = urllib.parse.urlencode(
+        {
+            "response_type": "code",
+            "client_id": settings["client_id"],
+            "redirect_uri": _build_portal_redirect_uri(request),
+            "scope": settings["scope"],
+            "state": state_value,
+        }
+    )
+    response = RedirectResponse(url=f"{settings['authorization_url']}?{query}", status_code=302)
+    response.set_cookie(PORTAL_OIDC_STATE_COOKIE, state_value, path="/", max_age=600, samesite="lax", httponly=True)
+    return response
+
+
+@router.get("/auth/oidc/callback")
+async def portal_oidc_callback(
+    request: Request,
+    code: Optional[str] = Query(default=None),
+    state: Optional[str] = Query(default=None),
+    error: Optional[str] = Query(default=None),
+    portal_oidc_state: Optional[str] = Cookie(default=None),
+):
+    _assert_portal_public_role("OIDC 登录")
+    settings = _get_oidc_settings()
+    portal_path = "/portal"
+    if not settings["enabled"]:
+        return RedirectResponse(url=f"{portal_path}?oidc_error={urllib.parse.quote('当前未启用 OIDC 登录')}", status_code=302)
+    if error:
+        return RedirectResponse(url=f"{portal_path}?oidc_error={urllib.parse.quote(error)}", status_code=302)
+    if not code:
+        return RedirectResponse(url=f"{portal_path}?oidc_error={urllib.parse.quote('OIDC 回调缺少 code')}", status_code=302)
+    if not state or not portal_oidc_state or state != portal_oidc_state:
+        return RedirectResponse(url=f"{portal_path}?oidc_error={urllib.parse.quote('OIDC state 校验失败')}", status_code=302)
+
+    token_body = urllib.parse.urlencode(
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": settings["client_id"],
+            "client_secret": settings["client_secret"],
+            "redirect_uri": _build_portal_redirect_uri(request),
+        }
+    ).encode("utf-8")
+    token_status, token_payload = await _oidc_http_request(
+        settings["token_url"],
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        body=token_body,
+    )
+    if token_status < 200 or token_status >= 300 or not isinstance(token_payload, dict):
+        raise HTTPException(status_code=502, detail="OIDC token 响应无效")
+
+    access_token = str(token_payload.get("access_token") or "").strip()
+    if not access_token:
+        raise HTTPException(status_code=502, detail="OIDC token 响应缺少 access_token")
+
+    userinfo_status, userinfo_payload = await _oidc_http_request(
+        settings["userinfo_url"],
+        method="GET",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+    )
+    if userinfo_status < 200 or userinfo_status >= 300 or not isinstance(userinfo_payload, dict):
+        raise HTTPException(status_code=502, detail="OIDC userinfo 响应无效")
+
+    user = await _resolve_or_create_oidc_user(userinfo_payload, settings["base_url"])
+    response = RedirectResponse(url=f"{portal_path}?oidc=success", status_code=302)
+    await _login_portal_user(response, int(user["id"]))
+    response.delete_cookie(PORTAL_OIDC_STATE_COOKIE, path="/")
+    return response
 
 
 @router.post("/auth/logout")
@@ -465,6 +670,38 @@ async def list_portal_user_transactions(
         "success": True,
         "items": items,
         **_build_pagination(limit=limit, offset=offset, total=total),
+    }
+
+
+@router.get("/user/checkin")
+async def get_portal_user_checkin(user: dict = Depends(verify_portal_user_token)):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    return {
+        "success": True,
+        **(await _db.get_portal_user_checkin_status(int(user["id"]))),
+        "min_quota": config.portal_checkin_min_quota,
+        "max_quota": config.portal_checkin_max_quota,
+    }
+
+
+@router.post("/user/checkin")
+async def claim_portal_user_checkin(user: dict = Depends(verify_portal_user_token)):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    ok, message, payload = await _db.claim_portal_user_checkin(
+        int(user["id"]),
+        min_quota=config.portal_checkin_min_quota,
+        max_quota=config.portal_checkin_max_quota,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=message)
+    workspace = await _build_portal_user_workspace_payload(int(user["id"]))
+    return {
+        "success": True,
+        "message": message,
+        "checkin": payload,
+        **workspace,
     }
 
 

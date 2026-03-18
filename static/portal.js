@@ -309,10 +309,23 @@ function getRegisterLocation() {
   return window.location.pathname === "/" ? "/" : "master-portal";
 }
 
+function isOidcEnabled() {
+  return !!(state.summary?.auth?.oidc?.enabled || state.summary?.capabilities?.user_login_oidc);
+}
+
+function isOauthOnly() {
+  return !!state.summary?.auth?.oauth_only;
+}
+
 function renderSummaryHints() {
   const role = state.summary?.service?.role || state.summary?.meta?.role || "unknown";
   const registerButton = dom.byId("registerSubmitBtn");
   const locationHint = dom.byId("registerLocationHint");
+  const oidcWrap = dom.byId("oidcLoginWrap");
+  const oidcHint = dom.byId("oidcLoginHint");
+  const authModeHint = dom.byId("authModeHint");
+  const localLoginForm = dom.byId("loginForm");
+  const registerTabBtn = dom.byId("tabRegisterBtn");
 
   if (locationHint) {
     locationHint.textContent = role === "master"
@@ -320,7 +333,30 @@ function renderSummaryHints() {
       : "当前不是主节点门户，自注册可能被后端拒绝。";
   }
   if (registerButton) {
-    registerButton.disabled = false;
+    registerButton.disabled = isOauthOnly();
+  }
+  showBlock("loginForm", !isOauthOnly());
+  showBlock("tabRegisterBtn", !isOauthOnly());
+  if (isOauthOnly()) {
+    renderAuthTab("login");
+  }
+  showBlock("oidcLoginWrap", isOidcEnabled());
+  if (oidcHint) {
+    oidcHint.textContent = isOidcEnabled()
+      ? `已启用标准 OAuth2 / OIDC 登录，默认 scope: ${state.summary?.auth?.oidc?.scope || "openid profile email"}。`
+      : "";
+  }
+  showBlock("authModeHint", isOauthOnly());
+  if (authModeHint) {
+    authModeHint.textContent = isOauthOnly()
+      ? "当前站点已开启仅 OAuth / OIDC 登录，用户名密码登录和自注册已关闭。"
+      : "";
+  }
+  if (localLoginForm && isOauthOnly()) {
+    localLoginForm.reset();
+  }
+  if (registerTabBtn && isOauthOnly()) {
+    registerTabBtn.classList.remove("active");
   }
 }
 
@@ -347,6 +383,7 @@ function renderDashboard() {
   const usage = state.workspace?.usage || {};
   const recentRedeems = Array.isArray(state.workspace?.recent_redeems) ? state.workspace.recent_redeems : [];
   const latestRedeem = recentRedeems.length > 0 ? recentRedeems[0] : null;
+  const checkin = state.workspace?.checkin || {};
 
   setText("statQuotaRemaining", user.quota_remaining ?? 0);
   setText("statQuotaUsed", user.quota_used ?? 0);
@@ -357,7 +394,21 @@ function renderDashboard() {
     usage.success_rate == null ? "--" : `${Number(usage.success_rate).toFixed(2)}%`,
   );
   setText("statLastRequest", formatDateTime(usage.last_request_at));
-  setText("usageRuleText", "最终生成成功才扣减 1 次；失败、取消或报错会返还次数。");
+  const registerBonus = Number(state.summary?.auth?.register_bonus_quota || 0);
+  setText("usageRuleText", registerBonus > 0
+    ? `最终生成成功才扣减 1 次；失败、取消或报错会返还次数。新用户注册赠送 ${registerBonus} 次。`
+    : "最终生成成功才扣减 1 次；失败、取消或报错会返还次数。");
+  const checkinButton = dom.byId("checkinBtn");
+  if (checkinButton) {
+    checkinButton.disabled = !!checkin.checked_in_today || Number(state.summary?.auth?.checkin_max_quota || 0) <= 0;
+  }
+  if (Number(state.summary?.auth?.checkin_max_quota || 0) <= 0) {
+    showNotice("checkinNotice", "当前未开启签到奖励。", "info");
+  } else if (checkin.checked_in_today) {
+    showNotice("checkinNotice", `今天已签到，获得 ${checkin.today_reward || 0} 次奖励。`, "success");
+  } else {
+    showNotice("checkinNotice", `今日可签到，奖励范围 ${state.summary?.auth?.checkin_min_quota || 0}-${state.summary?.auth?.checkin_max_quota || 0} 次。`, "info");
+  }
 
   showBlock("latestRedeemEmpty", !latestRedeem);
   showBlock("latestRedeemCard", !!latestRedeem);
@@ -366,6 +417,28 @@ function renderDashboard() {
     setText("latestRedeemQuota", latestRedeem.quota_times ?? "--");
     setText("latestRedeemTime", formatDateTime(latestRedeem.redeemed_at));
   }
+}
+
+function renderLeaderboard() {
+  const tbody = dom.byId("leaderboardTableBody");
+  if (!tbody) {
+    return;
+  }
+  const items = Array.isArray(state.workspace?.leaderboard) ? state.workspace.leaderboard : [];
+  if (!items.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-cell">暂无排行数据。</td></tr>';
+    return;
+  }
+  tbody.innerHTML = items.map((item) => `
+    <tr>
+      <td>${escapeHtml(String(item.rank ?? "--"))}</td>
+      <td>${escapeHtml(item.display_name || item.username || "--")}</td>
+      <td>${escapeHtml(String(item.request_total ?? 0))}</td>
+      <td>${escapeHtml(String(item.solve_success_total ?? 0))}</td>
+      <td>${escapeHtml(String(item.recent_7d_total ?? 0))}</td>
+      <td>${escapeHtml(String(item.quota_used ?? 0))}</td>
+    </tr>
+  `).join("");
 }
 
 function renderApiKeys() {
@@ -536,6 +609,7 @@ function renderWorkspace() {
   renderTransactions();
   renderLogs();
   renderAccount();
+  renderLeaderboard();
 }
 
 function applyPagedPayload(target, payload, fallbackLimit, fallbackOffset) {
@@ -714,6 +788,40 @@ async function handleLogout() {
   showNotice("guestNotice", "你已退出登录。", "info");
 }
 
+async function handleCheckin() {
+  const result = await requestJson("/api/portal/user/checkin", { method: "POST" });
+  state.workspace = result;
+  state.user = result.user || state.user;
+  renderWorkspace();
+  showNotice("checkinNotice", result.message || `签到成功，获得 ${result.checkin?.granted_quota || 0} 次奖励。`, "success");
+  showNotice("appNotice", result.message || "签到成功。", "success");
+}
+
+function handleOidcLogin() {
+  window.location.href = "/api/portal/auth/oidc/start";
+}
+
+function consumeOidcResultParams() {
+  const url = new URL(window.location.href);
+  const success = url.searchParams.get("oidc");
+  const error = url.searchParams.get("oidc_error");
+  if (!success && !error) {
+    return;
+  }
+
+  url.searchParams.delete("oidc");
+  url.searchParams.delete("oidc_error");
+  window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+
+  if (error) {
+    showNotice("guestNotice", error, "error");
+    return;
+  }
+  if (success === "success") {
+    showNotice(isAuthenticated() ? "appNotice" : "guestNotice", "OIDC 登录成功。", "success");
+  }
+}
+
 async function handleCreateApiKey(event) {
   event.preventDefault();
   const name = String(dom.byId("newApiKeyName")?.value || "").trim();
@@ -810,6 +918,22 @@ function wireEvents() {
       await handleLogin(event);
     } catch (error) {
       showNotice("guestNotice", error.message || "登录失败", "error");
+    }
+  });
+
+  dom.byId("oidcLoginBtn")?.addEventListener("click", () => {
+    try {
+      handleOidcLogin();
+    } catch (error) {
+      showNotice("guestNotice", error.message || "OIDC 登录失败", "error");
+    }
+  });
+
+  dom.byId("checkinBtn")?.addEventListener("click", async () => {
+    try {
+      await handleCheckin();
+    } catch (error) {
+      showNotice("checkinNotice", error.message || "签到失败", "error");
     }
   });
 
@@ -1008,6 +1132,7 @@ async function bootstrap() {
     await loadLogs(false);
     switchPage("dashboard");
   }
+  consumeOidcResultParams();
 }
 
 document.addEventListener("click", async (event) => {

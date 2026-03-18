@@ -280,7 +280,7 @@ def _build_pagination(limit: int, offset: int, total: int) -> Dict[str, Any]:
 
 
 def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], list[str]]:
-    allowed_sections = {"server", "storage", "captcha", "log", "cluster"}
+    allowed_sections = {"server", "storage", "portal", "captcha", "log", "cluster"}
     updates: Dict[str, Dict[str, Any]] = {}
     changed_keys: list[str] = []
 
@@ -314,6 +314,65 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
             changed_keys.append("storage.db_path")
         if section:
             updates["storage"] = section
+
+    portal_cfg = payload.get("portal")
+    if isinstance(portal_cfg, dict):
+        section = {}
+        if "oidc_enabled" in portal_cfg:
+            section["oidc_enabled"] = _as_bool(portal_cfg.get("oidc_enabled"), "portal.oidc_enabled")
+            changed_keys.append("portal.oidc_enabled")
+        if "oidc_base_url" in portal_cfg:
+            section["oidc_base_url"] = str(portal_cfg.get("oidc_base_url") or "").strip().rstrip("/")
+            changed_keys.append("portal.oidc_base_url")
+        if "oidc_client_id" in portal_cfg:
+            section["oidc_client_id"] = str(portal_cfg.get("oidc_client_id") or "").strip()
+            changed_keys.append("portal.oidc_client_id")
+        if "oidc_client_secret" in portal_cfg:
+            section["oidc_client_secret"] = str(portal_cfg.get("oidc_client_secret") or "").strip()
+            changed_keys.append("portal.oidc_client_secret")
+        if "oidc_scope" in portal_cfg:
+            scope = " ".join(str(portal_cfg.get("oidc_scope") or "").strip().split())
+            section["oidc_scope"] = scope or "openid profile email"
+            changed_keys.append("portal.oidc_scope")
+        if "oauth_only" in portal_cfg:
+            section["oauth_only"] = _as_bool(portal_cfg.get("oauth_only"), "portal.oauth_only")
+            changed_keys.append("portal.oauth_only")
+        if "register_bonus_quota" in portal_cfg:
+            section["register_bonus_quota"] = _as_int(portal_cfg.get("register_bonus_quota"), "portal.register_bonus_quota", 0, 2147483647)
+            changed_keys.append("portal.register_bonus_quota")
+        if "checkin_min_quota" in portal_cfg:
+            section["checkin_min_quota"] = _as_int(portal_cfg.get("checkin_min_quota"), "portal.checkin_min_quota", 0, 2147483647)
+            changed_keys.append("portal.checkin_min_quota")
+        if "checkin_max_quota" in portal_cfg:
+            section["checkin_max_quota"] = _as_int(portal_cfg.get("checkin_max_quota"), "portal.checkin_max_quota", 0, 2147483647)
+            changed_keys.append("portal.checkin_max_quota")
+
+        effective_enabled = section.get("oidc_enabled", config.portal_oidc_enabled)
+        effective_base_url = section.get("oidc_base_url", config.portal_oidc_base_url)
+        effective_client_id = section.get("oidc_client_id", config.portal_oidc_client_id)
+        effective_client_secret = section.get("oidc_client_secret", config.portal_oidc_client_secret)
+        effective_oauth_only = section.get("oauth_only", config.portal_oauth_only)
+        effective_checkin_min = section.get("checkin_min_quota", config.portal_checkin_min_quota)
+        effective_checkin_max = section.get("checkin_max_quota", config.portal_checkin_max_quota)
+        if effective_enabled:
+            missing_fields = []
+            if not effective_base_url:
+                missing_fields.append("portal.oidc_base_url")
+            if not effective_client_id:
+                missing_fields.append("portal.oidc_client_id")
+            if not effective_client_secret:
+                missing_fields.append("portal.oidc_client_secret")
+            if missing_fields:
+                raise HTTPException(status_code=400, detail=f"OIDC 已启用但缺少配置: {', '.join(missing_fields)}")
+            parsed = urllib.parse.urlparse(effective_base_url)
+            if parsed.scheme not in {"http", "https"} or not (parsed.netloc or "").strip():
+                raise HTTPException(status_code=400, detail="portal.oidc_base_url 格式无效")
+        if effective_oauth_only and not effective_enabled:
+            raise HTTPException(status_code=400, detail="portal.oauth_only 开启时，必须同时启用 OIDC 登录")
+        if effective_checkin_max < effective_checkin_min:
+            raise HTTPException(status_code=400, detail="portal.checkin_max_quota 不能小于 portal.checkin_min_quota")
+        if section:
+            updates["portal"] = section
 
     captcha_cfg = payload.get("captcha")
     if isinstance(captcha_cfg, dict):
@@ -469,6 +528,17 @@ def _build_system_config_payload(admin_profile: Dict[str, Any]) -> Dict[str, Any
         "config": {
             "server": merged.get("server", {}),
             "storage": merged.get("storage", {}),
+            "portal": {
+                "oidc_enabled": bool(merged.get("portal", {}).get("oidc_enabled", False)),
+                "oidc_base_url": merged.get("portal", {}).get("oidc_base_url", ""),
+                "oidc_client_id": merged.get("portal", {}).get("oidc_client_id", ""),
+                "oidc_client_secret": merged.get("portal", {}).get("oidc_client_secret", ""),
+                "oidc_scope": merged.get("portal", {}).get("oidc_scope", "openid profile email"),
+                "oauth_only": bool(merged.get("portal", {}).get("oauth_only", False)),
+                "register_bonus_quota": int(merged.get("portal", {}).get("register_bonus_quota", 0) or 0),
+                "checkin_min_quota": int(merged.get("portal", {}).get("checkin_min_quota", 0) or 0),
+                "checkin_max_quota": int(merged.get("portal", {}).get("checkin_max_quota", 0) or 0),
+            },
             "captcha": merged.get("captcha", {}),
             "log": merged.get("log", {}),
             "cluster": merged.get("cluster", {}),
