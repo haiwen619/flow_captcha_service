@@ -83,6 +83,19 @@ function setText(id, value) {
   }
 }
 
+function abbreviateUsername(value, maxLength = 24) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "--";
+  }
+  if (text.length <= maxLength) {
+    return text;
+  }
+  const headLength = Math.max(8, Math.ceil((maxLength - 1) / 2));
+  const tailLength = Math.max(6, Math.floor((maxLength - 1) / 2));
+  return `${text.slice(0, headLength)}…${text.slice(-tailLength)}`;
+}
+
 function showBlock(id, visible) {
   const element = dom.byId(id);
   if (!element) {
@@ -378,11 +391,12 @@ async function loadSummary() {
 function renderHeader() {
   const user = state.user || {};
   const username = String(user.username || "--");
-  setText("headerTitle", user.username || "当前账号");
+  const shortUsername = abbreviateUsername(username, 22);
+  setText("headerTitle", shortUsername || "当前账号");
   setText("headerSubtitle", "仅展示当前账号自己的信息与操作。");
-  setText("headerUsername", username);
+  setText("headerUsername", shortUsername);
   setText("headerQuota", `剩余次数 ${user.quota_remaining ?? 0}`);
-  setText("workspaceUser", username);
+  setText("workspaceUser", shortUsername);
   const headerUsernameEl = dom.byId("headerUsername");
   if (headerUsernameEl) {
     headerUsernameEl.title = username;
@@ -604,12 +618,17 @@ function renderLogs() {
 
 function renderAccount() {
   const user = state.workspace?.user || state.user || {};
-  setText("accountUsernameValue", user.username || "--");
+  const username = String(user.username || "--");
+  setText("accountUsernameValue", abbreviateUsername(username, 30));
   setText("accountRegisteredValue", isAuthenticated() ? "已注册" : "未注册");
   setText("accountLocationValue", user.register_location || "--");
   setText("accountEnabledValue", user.enabled ? "启用中" : "已禁用");
   setText("accountCreatedAtValue", formatDateTime(user.created_at));
   setText("accountLastLoginValue", formatDateTime(user.last_login_at));
+  const accountUsernameEl = dom.byId("accountUsernameValue");
+  if (accountUsernameEl) {
+    accountUsernameEl.title = username;
+  }
 }
 
 function renderWorkspace() {
