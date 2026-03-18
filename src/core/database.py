@@ -1800,6 +1800,61 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+    async def _delete_portal_user_in_tx(self, db: aiosqlite.Connection, user_id: int) -> bool:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT id FROM portal_users WHERE id = ?", (user_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return False
+
+        await db.execute(
+            "UPDATE portal_cdks SET redeemed_user_id = NULL, redeemed_at = NULL WHERE redeemed_user_id = ?",
+            (user_id,),
+        )
+        await db.execute(
+            "DELETE FROM session_quota_events WHERE owner_type = 'portal_user' AND owner_id = ?",
+            (user_id,),
+        )
+        await db.execute("DELETE FROM captcha_jobs WHERE portal_user_id = ?", (user_id,))
+        await db.execute("DELETE FROM portal_user_jobs WHERE portal_user_id = ?", (user_id,))
+        await db.execute("DELETE FROM portal_user_transactions WHERE portal_user_id = ?", (user_id,))
+        await db.execute("DELETE FROM portal_user_checkins WHERE portal_user_id = ?", (user_id,))
+        await db.execute("DELETE FROM portal_user_api_keys WHERE portal_user_id = ?", (user_id,))
+        await db.execute("DELETE FROM portal_users WHERE id = ?", (user_id,))
+        return True
+
+    async def delete_portal_user(self, user_id: int) -> bool:
+        async with self._write_connect() as db:
+            deleted = await self._delete_portal_user_in_tx(db, int(user_id))
+            await db.commit()
+            return deleted
+
+    async def delete_portal_users(self, user_ids: List[int]) -> List[int]:
+        normalized_ids: List[int] = []
+        seen: set[int] = set()
+        for raw_id in user_ids or []:
+            user_id = int(raw_id or 0)
+            if user_id <= 0 or user_id in seen:
+                continue
+            seen.add(user_id)
+            normalized_ids.append(user_id)
+
+        if not normalized_ids:
+            return []
+
+        deleted_ids: List[int] = []
+        async with self._write_connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                for user_id in normalized_ids:
+                    if await self._delete_portal_user_in_tx(db, user_id):
+                        deleted_ids.append(user_id)
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+        return deleted_ids
+
     async def create_portal_user_api_key(self, portal_user_id: int, name: str) -> Tuple[str, Dict[str, Any]]:
         raw_key, key_hash, key_prefix = self._generate_service_api_key()
         normalized_name = str(name or "").strip() or f"key-{portal_user_id}"
@@ -2316,6 +2371,16 @@ class Database:
             cursor = await db.execute("SELECT COUNT(*) AS total FROM captcha_jobs")
             row = await cursor.fetchone()
             return int(row["total"] or 0) if row else 0
+
+    async def clear_job_logs(self) -> Dict[str, int]:
+        async with self._write_connect() as db:
+            captcha_cursor = await db.execute("DELETE FROM captcha_jobs")
+            portal_cursor = await db.execute("DELETE FROM portal_user_jobs")
+            await db.commit()
+            return {
+                "captcha_jobs": int(captcha_cursor.rowcount or 0),
+                "portal_user_jobs": int(portal_cursor.rowcount or 0),
+            }
 
 
     async def list_job_logs_by_api_key(
@@ -2920,6 +2985,42 @@ class Database:
             )
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+    async def clear_cluster_node_logs(
+        self,
+        node_id: int,
+        *,
+        clear_heartbeats: bool = False,
+        clear_errors: bool = False,
+    ) -> Dict[str, int]:
+        if not clear_heartbeats and not clear_errors:
+            return {"heartbeats": 0, "errors": 0}
+
+        async with self._write_connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT id FROM cluster_nodes WHERE id = ?", (node_id,))
+            row = await cursor.fetchone()
+            if not row:
+                raise ValueError("节点不存在")
+
+            result = {"heartbeats": 0, "errors": 0}
+            if clear_heartbeats:
+                heartbeat_cursor = await db.execute("DELETE FROM cluster_node_heartbeats WHERE node_id = ?", (node_id,))
+                result["heartbeats"] = int(heartbeat_cursor.rowcount or 0)
+            if clear_errors:
+                error_cursor = await db.execute("DELETE FROM cluster_node_errors WHERE node_id = ?", (node_id,))
+                result["errors"] = int(error_cursor.rowcount or 0)
+                await db.execute(
+                    """
+                    UPDATE cluster_nodes
+                    SET last_error = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (node_id,),
+                )
+            await db.commit()
+            return result
 
     async def get_available_cluster_nodes(self, stale_seconds: int) -> List[Dict[str, Any]]:
         stale_seconds = max(10, int(stale_seconds))

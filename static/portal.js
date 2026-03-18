@@ -377,11 +377,16 @@ async function loadSummary() {
 
 function renderHeader() {
   const user = state.user || {};
+  const username = String(user.username || "--");
   setText("headerTitle", user.username || "当前账号");
   setText("headerSubtitle", "仅展示当前账号自己的信息与操作。");
-  setText("headerUsername", user.username || "--");
+  setText("headerUsername", username);
   setText("headerQuota", `剩余次数 ${user.quota_remaining ?? 0}`);
-  setText("workspaceUser", user.username || "--");
+  setText("workspaceUser", username);
+  const headerUsernameEl = dom.byId("headerUsername");
+  if (headerUsernameEl) {
+    headerUsernameEl.title = username;
+  }
 }
 
 function renderDashboard() {

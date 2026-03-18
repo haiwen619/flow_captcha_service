@@ -85,6 +85,10 @@ class PortalUserUpdateRequest(BaseModel):
     new_password: Optional[str] = Field(default=None, min_length=6, max_length=120)
 
 
+class BatchPortalUserDeleteRequest(BaseModel):
+    user_ids: list[int] = Field(min_length=1, max_length=500)
+
+
 class PortalUserApiKeyCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
 
@@ -167,6 +171,10 @@ class ClusterHeartbeatRequest(BaseModel):
 class ClusterNodeUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
     weight: Optional[int] = Field(default=None, ge=1)
+
+
+class ClusterNodeLogClearRequest(BaseModel):
+    scopes: list[str] = Field(min_length=1, max_length=4)
 
 
 @dataclass

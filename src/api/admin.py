@@ -10,7 +10,9 @@ from ..core.config import config
 from ..core.database import Database
 from ..core.logger import debug_logger
 from ..core.models import (
+    BatchPortalUserDeleteRequest,
     ClusterNodeUpdateRequest,
+    ClusterNodeLogClearRequest,
     CreateApiKeyRequest,
     LoginRequest,
     PortalCdkBatchCreateRequest,
@@ -782,15 +784,44 @@ async def soft_delete_portal_user(
     token: str = Depends(verify_admin_token),
 ):
     if _db is None:
-        raise HTTPException(status_code=500, detail="??????")
-    _assert_portal_admin_role("????")
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_portal_admin_role("用户管理")
 
-    updated = await _db.update_portal_user(user_id=user_id, enabled=False)
-    if not updated:
-        raise HTTPException(status_code=404, detail="?????")
+    deleted = await _db.delete_portal_user(user_id=user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="用户不存在")
 
     revoke_portal_user_tokens_by_user_id(user_id)
-    return {"success": True, "item": updated, "message": f"?? #{user_id} ?????????"}
+    return {"success": True, "message": f"用户 #{user_id} 已删除"}
+
+
+@router.post("/users/batch-delete")
+@router.post("/portal-users/batch-delete")
+async def batch_delete_portal_users(
+    request: BatchPortalUserDeleteRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_portal_admin_role("用户管理")
+
+    user_ids = [int(user_id) for user_id in request.user_ids if int(user_id or 0) > 0]
+    if not user_ids:
+        raise HTTPException(status_code=400, detail="请至少提供 1 个有效用户 ID")
+
+    deleted_ids = await _db.delete_portal_users(user_ids)
+    if not deleted_ids:
+        raise HTTPException(status_code=404, detail="未找到可删除的用户")
+
+    for user_id in deleted_ids:
+        revoke_portal_user_tokens_by_user_id(user_id)
+
+    return {
+        "success": True,
+        "deleted_ids": deleted_ids,
+        "deleted_count": len(deleted_ids),
+        "message": f"已删除 {len(deleted_ids)} 个用户",
+    }
 
 
 @router.get("/cdks")
@@ -874,6 +905,20 @@ async def get_logs(
         "success": True,
         "items": items,
         **_build_pagination(limit=limit, offset=offset, total=total),
+    }
+
+
+@router.post("/logs/clear")
+async def clear_logs(token: str = Depends(verify_admin_token)):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+
+    result = await _db.clear_job_logs()
+    total_deleted = int(result.get("captcha_jobs") or 0) + int(result.get("portal_user_jobs") or 0)
+    return {
+        "success": True,
+        "deleted": result,
+        "message": f"已清空 {total_deleted} 条请求日志",
     }
 
 
@@ -1006,6 +1051,43 @@ async def get_cluster_node_detail(
         "item": item,
         "heartbeats": heartbeats,
         "errors": errors,
+    }
+
+
+@router.post("/cluster/nodes/{node_id}/logs/clear")
+async def clear_cluster_node_logs(
+    node_id: int,
+    request: ClusterNodeLogClearRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_master_role("子节点诊断详情")
+
+    requested_scopes = {str(scope or "").strip().lower() for scope in request.scopes}
+    clear_heartbeats = "heartbeats" in requested_scopes
+    clear_errors = "errors" in requested_scopes
+    if not clear_heartbeats and not clear_errors:
+        raise HTTPException(status_code=400, detail="scopes 仅支持 heartbeats / errors")
+
+    try:
+        result = await _db.clear_cluster_node_logs(
+            node_id=node_id,
+            clear_heartbeats=clear_heartbeats,
+            clear_errors=clear_errors,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    cleared_parts = []
+    if clear_heartbeats:
+        cleared_parts.append(f"心跳日志 {result['heartbeats']} 条")
+    if clear_errors:
+        cleared_parts.append(f"错误日志 {result['errors']} 条")
+    return {
+        "success": True,
+        "deleted": result,
+        "message": f"已清空子节点 #{node_id} 的" + "，".join(cleared_parts),
     }
 
 

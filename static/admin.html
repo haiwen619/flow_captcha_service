@@ -1682,10 +1682,11 @@
           </div>
           <div class="inline-note">默认按表格浏览，只保留启用、密码重置和加次数操作，避免整屏输入框影响阅读。</div>
           <div class="batch-toolbar">
-            <div class="toolbar-note">勾选多名用户后，可一次性给选中账号统一增加次数。</div>
+            <div class="toolbar-note">勾选多名用户后，可批量加次数，或一次性删除选中账号。</div>
             <div class="actions">
               <input id="usersBatchQuotaDelta" class="table-mini-input quota-delta" type="number" value="100" min="1" />
               <button id="applyUsersBatchQuotaBtn" class="secondary" type="button">批量添加次数</button>
+              <button id="deleteUsersBatchBtn" class="secondary" type="button">批量删除用户</button>
             </div>
           </div>
           <div class="table-toolbar">
@@ -1732,7 +1733,7 @@
             </div>
             <div class="toolbar-right">
               <div id="logsTableStat" class="toolbar-badge">日志 0</div>
-              <div class="actions"><button id="refreshLogsBtn" class="secondary">刷新日志</button></div>
+              <div class="actions"><button id="refreshLogsBtn" class="secondary">刷新日志</button><button id="clearLogsBtn" class="secondary" type="button">清空请求日志</button></div>
             </div>
           </div>
           <div class="table-toolbar">
@@ -1775,7 +1776,12 @@
   <aside id="nodeDetailDrawer" class="drawer hidden" aria-hidden="true">
     <div class="drawer-head">
       <h3 id="nodeDetailTitle">节点详情</h3>
-      <button id="closeNodeDetailBtn" class="secondary">关闭</button>
+      <div class="actions">
+        <button id="clearNodeHeartbeatsBtn" class="secondary" type="button">清空心跳</button>
+        <button id="clearNodeErrorsBtn" class="secondary" type="button">清空错误</button>
+        <button id="clearNodeAllLogsBtn" class="secondary" type="button">全部清空</button>
+        <button id="closeNodeDetailBtn" class="secondary">关闭</button>
+      </div>
     </div>
     <div class="drawer-content">
       <section class="panel" style="margin-top:0">
@@ -1801,6 +1807,7 @@
         token: "",
         role: "unknown",
         page: "overview",
+        currentNodeDetailId: 0,
         portalUsers: [],
         clusterNodes: [],
         clusterSearch: "",
@@ -2298,7 +2305,7 @@
         const b = q("portalUsersTable"); b.innerHTML = "";
         for (const it of items) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td><input type="checkbox" data-user-select="1" data-user-id="${it.id}" /></td><td>${it.id}</td><td><div class="cell-stack"><span class="cell-main">${esc(it.username || "-")}</span></div></td><td><div class="cell-stack"><span class="cell-main">${esc(it.display_name || "-")}</span></div></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="quota-badge">${it.quota_remaining ?? 0}</span></td><td><span class="quota-badge">${it.quota_used ?? 0}</span></td><td><input class="table-mini-input quota-delta" type="number" min="0" value="0" data-user-id="${it.id}" data-user-key="quota_remaining_delta" /></td><td><input class="table-mini-input table-pass-input" type="password" data-user-id="${it.id}" data-user-key="new_password" placeholder="留空不修改" /></td><td>${it.last_login_at || "-"}</td><td><div class="action-row"><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button></div></td>`;
+          tr.innerHTML = `<td><input type="checkbox" data-user-select="1" data-user-id="${it.id}" /></td><td>${it.id}</td><td><div class="cell-stack"><span class="cell-main">${esc(it.username || "-")}</span></div></td><td><div class="cell-stack"><span class="cell-main">${esc(it.display_name || "-")}</span></div></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="quota-badge">${it.quota_remaining ?? 0}</span></td><td><span class="quota-badge">${it.quota_used ?? 0}</span></td><td><input class="table-mini-input quota-delta" type="number" min="0" value="0" data-user-id="${it.id}" data-user-key="quota_remaining_delta" /></td><td><input class="table-mini-input table-pass-input" type="password" data-user-id="${it.id}" data-user-key="new_password" placeholder="留空不修改" /></td><td>${it.last_login_at || "-"}</td><td><div class="action-row"><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button><button class="secondary" data-action="delete-user" data-id="${it.id}">删除</button></div></td>`;
           b.appendChild(tr);
         }
         if (!items.length) {
@@ -2340,6 +2347,7 @@
       };
       const renderNodeDetail = (detail = {}) => {
         const item = detail.item || {};
+        state.currentNodeDetailId = Number(item.id || 0);
         q("nodeDetailTitle").textContent = `节点详情 #${item.id ?? "-"}`;
         const summary = q("nodeDetailSummary");
         summary.innerHTML = "";
@@ -2402,6 +2410,21 @@
         const detail = await req(`/api/admin/cluster/nodes/${nodeId}/detail?heartbeat_limit=20&error_limit=20`);
         renderNodeDetail(detail || {});
         openNodeDetailDrawer();
+      };
+      const getSelectedUserIds = () => Array.from(document.querySelectorAll('input[data-user-select="1"]:checked'))
+        .map((el) => Number(el.getAttribute("data-user-id")))
+        .filter((id) => Number.isFinite(id) && id > 0);
+      const clearNodeLogs = async (scopes) => {
+        const nodeId = Number(state.currentNodeDetailId || 0);
+        if (!Number.isFinite(nodeId) || nodeId <= 0) throw new Error("当前没有可操作的子节点。");
+        const labels = Array.isArray(scopes) ? scopes : [];
+        const scopeText = labels.includes("heartbeats") && labels.includes("errors")
+          ? "心跳和错误日志"
+          : (labels.includes("heartbeats") ? "心跳日志" : "错误日志");
+        if (!window.confirm(`确定清空子节点 #${nodeId} 的${scopeText}吗？`)) return;
+        const result = await req(`/api/admin/cluster/nodes/${nodeId}/logs/clear`, { method: "POST", body: { scopes: labels } });
+        await loadNodeDetail(nodeId);
+        showNotice(result.message || `已清空子节点 #${nodeId} 的${scopeText}。`, "ok");
       };
       const resolveReasonBadgeClass = (reasonCode) => {
         const code = String(reasonCode || "").toLowerCase();
@@ -2570,12 +2593,33 @@
           showNotice(`已为 ${ids.length} 个用户批量增加 ${delta} 次。`, "ok");
         } catch (err) { showNotice(`批量添加次数失败：${err.message}`, "err"); }
       });
+      q("deleteUsersBatchBtn").addEventListener("click", async () => {
+        try {
+          const ids = getSelectedUserIds();
+          if (!ids.length) throw new Error("请先勾选至少 1 个用户。");
+          if (!window.confirm(`确定删除选中的 ${ids.length} 个用户吗？删除后相关用户日志与个人 API Key 也会一起清理。`)) return;
+          const result = await req("/api/admin/users/batch-delete", { method: "POST", body: { user_ids: ids } });
+          await loadPortalUsers();
+          await loadStats();
+          showNotice(result.message || `已删除 ${ids.length} 个用户。`, "ok");
+        } catch (err) { showNotice(`批量删除用户失败：${err.message}`, "err"); }
+      });
       q("refreshLogsBtn").addEventListener("click", async () => {
         try {
           state.logs.offset = 0;
           await loadLogs();
           showNotice("日志已刷新。", "ok");
         } catch (err) { showNotice(`日志刷新失败：${err.message}`, "err"); }
+      });
+      q("clearLogsBtn").addEventListener("click", async () => {
+        try {
+          if (!window.confirm("确定清空全部请求日志吗？此操作不可撤销。")) return;
+          const result = await req("/api/admin/logs/clear", { method: "POST" });
+          state.logs.offset = 0;
+          await loadLogs();
+          await loadStats();
+          showNotice(result.message || "请求日志已清空。", "ok");
+        } catch (err) { showNotice(`清空请求日志失败：${err.message}`, "err"); }
       });
       q("cfgRole").addEventListener("change", () => applyRoleLayout(roleOfForm()));
       q("dashboardNav").addEventListener("click", (event) => {
@@ -2601,6 +2645,15 @@
       });
       q("closeNodeDetailBtn").addEventListener("click", closeNodeDetailDrawer);
       q("nodeDetailBackdrop").addEventListener("click", closeNodeDetailDrawer);
+      q("clearNodeHeartbeatsBtn").addEventListener("click", async () => {
+        try { await clearNodeLogs(["heartbeats"]); } catch (err) { showNotice(`清空心跳日志失败：${err.message}`, "err"); }
+      });
+      q("clearNodeErrorsBtn").addEventListener("click", async () => {
+        try { await clearNodeLogs(["errors"]); } catch (err) { showNotice(`清空错误日志失败：${err.message}`, "err"); }
+      });
+      q("clearNodeAllLogsBtn").addEventListener("click", async () => {
+        try { await clearNodeLogs(["heartbeats", "errors"]); } catch (err) { showNotice(`清空节点日志失败：${err.message}`, "err"); }
+      });
       q("closeResultModalBtn").addEventListener("click", closeResultModal);
       q("resultModalBackdrop").addEventListener("click", (event) => {
         if (event.target === q("resultModalBackdrop")) closeResultModal();

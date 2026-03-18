@@ -180,9 +180,10 @@ body.portal-authenticated .portal-shell{
   gap:10px;
 }
 .app-userbar .btn{
-  width:100%;
+  width:auto;
   display:flex;
   justify-content:center;
+  align-self:flex-start;
 }
 .inline-actions{align-items:center;flex-wrap:wrap}
 .filters-bar{margin-top:14px;flex-wrap:wrap}
@@ -393,21 +394,52 @@ body.portal-authenticated .app-main{
 .user-pill{
   display:flex;
   flex-direction:column;
-  gap:4px;
-  padding:13px 14px;
+  gap:8px;
+  padding:14px 14px 13px;
   border-radius:16px;
   border:1px solid rgba(148,163,184,.14);
   background:rgba(12,24,42,.56);
   min-width:0;
 }
+.user-pill-label{
+  display:inline-flex;
+  align-items:center;
+  align-self:flex-start;
+  padding:4px 9px;
+  border-radius:999px;
+  background:rgba(59,130,246,.14);
+  border:1px solid rgba(96,165,250,.16);
+  color:#bfd8ff;
+  font-size:10px;
+  line-height:1;
+  letter-spacing:.12em;
+  font-weight:700;
+  text-transform:uppercase;
+}
 .user-pill span{
-  font-size:15px;
+  display:block;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:clamp(15px,1.1vw,18px);
   font-weight:800;
   color:var(--text-strong);
+  line-height:1.25;
+  letter-spacing:-.01em;
 }
 .user-pill small{
-  color:var(--muted);
+  display:inline-flex;
+  align-items:center;
+  align-self:flex-start;
+  max-width:100%;
+  padding:5px 10px;
+  border-radius:999px;
+  border:1px solid rgba(148,163,184,.14);
+  background:rgba(8,17,32,.54);
+  color:#c9d9ee;
   font-size:12px;
+  line-height:1.2;
 }
 
 .workspace-panel{
@@ -618,6 +650,8 @@ td{font-size:14px;color:#e5eefb}
   .workspace-stats{grid-template-columns:1fr}
   .app-userbar,.section-head,.filters-bar,.pager{flex-direction:column;align-items:stretch}
   .app-userbar{grid-template-columns:1fr}
+  .app-userbar .btn{width:100%;align-self:stretch}
+  .user-pill span{white-space:normal;overflow-wrap:anywhere}
   .field{min-width:100%}
   .modal-actions,.pager-actions,.action-row,.table-actions{width:100%}
   .modal-actions .btn,.pager-actions .btn{width:100%}
