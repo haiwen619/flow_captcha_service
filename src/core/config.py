@@ -148,6 +148,7 @@ class Config:
                 "public_base_url": "",
                 "oidc_enabled": False,
                 "oidc_base_url": "",
+                "oidc_well_known_url": "",
                 "oidc_client_id": "",
                 "oidc_client_secret": "",
                 "oidc_scope": "openid profile email",
@@ -321,6 +322,10 @@ class Config:
     @property
     def portal_oidc_base_url(self) -> str:
         return str(self._get("portal", "oidc_base_url", "")).strip().rstrip("/")
+
+    @property
+    def portal_oidc_well_known_url(self) -> str:
+        return str(self._get("portal", "oidc_well_known_url", "")).strip()
 
     @property
     def portal_oidc_client_id(self) -> str:

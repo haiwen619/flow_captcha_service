@@ -327,6 +327,9 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
         if "oidc_base_url" in portal_cfg:
             section["oidc_base_url"] = str(portal_cfg.get("oidc_base_url") or "").strip().rstrip("/")
             changed_keys.append("portal.oidc_base_url")
+        if "oidc_well_known_url" in portal_cfg:
+            section["oidc_well_known_url"] = str(portal_cfg.get("oidc_well_known_url") or "").strip()
+            changed_keys.append("portal.oidc_well_known_url")
         if "oidc_client_id" in portal_cfg:
             section["oidc_client_id"] = str(portal_cfg.get("oidc_client_id") or "").strip()
             changed_keys.append("portal.oidc_client_id")
@@ -353,6 +356,7 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
         effective_enabled = section.get("oidc_enabled", config.portal_oidc_enabled)
         effective_public_base_url = section.get("public_base_url", config.portal_public_base_url)
         effective_base_url = section.get("oidc_base_url", config.portal_oidc_base_url)
+        effective_well_known_url = section.get("oidc_well_known_url", config.portal_oidc_well_known_url)
         effective_client_id = section.get("oidc_client_id", config.portal_oidc_client_id)
         effective_client_secret = section.get("oidc_client_secret", config.portal_oidc_client_secret)
         effective_oauth_only = section.get("oauth_only", config.portal_oauth_only)
@@ -362,8 +366,8 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
             missing_fields = []
             if not effective_public_base_url:
                 missing_fields.append("portal.public_base_url")
-            if not effective_base_url:
-                missing_fields.append("portal.oidc_base_url")
+            if not effective_base_url and not effective_well_known_url:
+                missing_fields.append("portal.oidc_base_url 或 portal.oidc_well_known_url")
             if not effective_client_id:
                 missing_fields.append("portal.oidc_client_id")
             if not effective_client_secret:
@@ -373,9 +377,14 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
             parsed_public = urllib.parse.urlparse(effective_public_base_url)
             if parsed_public.scheme not in {"http", "https"} or not (parsed_public.netloc or "").strip():
                 raise HTTPException(status_code=400, detail="portal.public_base_url 格式无效")
-            parsed = urllib.parse.urlparse(effective_base_url)
-            if parsed.scheme not in {"http", "https"} or not (parsed.netloc or "").strip():
-                raise HTTPException(status_code=400, detail="portal.oidc_base_url 格式无效")
+            if effective_base_url:
+                parsed = urllib.parse.urlparse(effective_base_url)
+                if parsed.scheme not in {"http", "https"} or not (parsed.netloc or "").strip():
+                    raise HTTPException(status_code=400, detail="portal.oidc_base_url 格式无效")
+            if effective_well_known_url:
+                parsed_well_known = urllib.parse.urlparse(effective_well_known_url)
+                if parsed_well_known.scheme not in {"http", "https"} or not (parsed_well_known.netloc or "").strip():
+                    raise HTTPException(status_code=400, detail="portal.oidc_well_known_url 格式无效")
         if effective_oauth_only and not effective_enabled:
             raise HTTPException(status_code=400, detail="portal.oauth_only 开启时，必须同时启用 OIDC 登录")
         if effective_checkin_max < effective_checkin_min:
@@ -541,6 +550,7 @@ def _build_system_config_payload(admin_profile: Dict[str, Any]) -> Dict[str, Any
                 "public_base_url": merged.get("portal", {}).get("public_base_url", ""),
                 "oidc_enabled": bool(merged.get("portal", {}).get("oidc_enabled", False)),
                 "oidc_base_url": merged.get("portal", {}).get("oidc_base_url", ""),
+                "oidc_well_known_url": merged.get("portal", {}).get("oidc_well_known_url", ""),
                 "oidc_client_id": merged.get("portal", {}).get("oidc_client_id", ""),
                 "oidc_client_secret": merged.get("portal", {}).get("oidc_client_secret", ""),
                 "oidc_scope": merged.get("portal", {}).get("oidc_scope", "openid profile email"),

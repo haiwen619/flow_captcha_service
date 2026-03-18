@@ -1537,9 +1537,12 @@
             <label class="checkbox-line"><input id="cfgOauthOnly" type="checkbox" /> 仅允许 OAuth / OIDC 登录</label>
           </div>
           <div class="grid">
-            <div class="field"><label>OIDC 基础地址</label><input id="cfgOidcBaseUrl" placeholder="https://sso.example.com" /><div class="hint">系统会按固定路径拼接 `/oauth/authorize`、`/oauth/token`、`/oauth/userinfo`。</div></div>
+            <div class="field"><label>OIDC 基础地址</label><input id="cfgOidcBaseUrl" placeholder="https://sso.example.com" /><div class="hint">可选。未填写 Well-Known 时，系统会按固定路径拼接 `/oauth/authorize`、`/oauth/token`、`/oauth/userinfo`。</div></div>
+            <div class="field"><label>OIDC Well-Known URL</label><input id="cfgOidcWellKnownUrl" placeholder="https://sso.example.com/.well-known/openid-configuration" /><div class="hint">可选。填写后优先自动发现 authorization/token/userinfo 端点。</div></div>
             <div class="field"><label>Client ID</label><input id="cfgOidcClientId" placeholder="client_id" /></div>
             <div class="field"><label>Client Secret</label><input id="cfgOidcClientSecret" type="password" placeholder="client_secret" /></div>
+          </div>
+          <div class="grid">
             <div class="field"><label>Scope</label><input id="cfgOidcScope" placeholder="openid profile email" /></div>
           </div>
           <div class="grid">
@@ -2098,6 +2101,7 @@
         q("cfgOidcEnabled").checked = !!cfg.portal?.oidc_enabled;
         q("cfgOauthOnly").checked = !!cfg.portal?.oauth_only;
         q("cfgOidcBaseUrl").value = cfg.portal?.oidc_base_url || "";
+        q("cfgOidcWellKnownUrl").value = cfg.portal?.oidc_well_known_url || "";
         q("cfgOidcClientId").value = cfg.portal?.oidc_client_id || "";
         q("cfgOidcClientSecret").value = cfg.portal?.oidc_client_secret || "";
         q("cfgOidcScope").value = cfg.portal?.oidc_scope || "openid profile email";
@@ -2147,6 +2151,7 @@
             oidc_enabled: q("cfgOidcEnabled").checked,
             oauth_only: q("cfgOauthOnly").checked,
             oidc_base_url: q("cfgOidcBaseUrl").value.trim(),
+            oidc_well_known_url: q("cfgOidcWellKnownUrl").value.trim(),
             oidc_client_id: q("cfgOidcClientId").value.trim(),
             oidc_client_secret: q("cfgOidcClientSecret").value.trim(),
             oidc_scope: q("cfgOidcScope").value.trim() || "openid profile email",
@@ -2642,10 +2647,12 @@
           if (payload.portal?.oidc_enabled) {
             const mustHave = [
               ["门户外部地址", payload.portal.public_base_url],
-              ["OIDC 基础地址", payload.portal.oidc_base_url],
               ["OIDC Client ID", payload.portal.oidc_client_id],
               ["OIDC Client Secret", payload.portal.oidc_client_secret],
             ];
+            if (!String(payload.portal.oidc_base_url || "").trim() && !String(payload.portal.oidc_well_known_url || "").trim()) {
+              mustHave.push(["OIDC 基础地址或 Well-Known URL", ""]);
+            }
             const missing = mustHave.filter((x) => !String(x[1] || "").trim()).map((x) => x[0]);
             if (missing.length > 0) {
               throw new Error(`OIDC 配置缺失：${missing.join("、")}`);

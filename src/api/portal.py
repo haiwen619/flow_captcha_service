@@ -65,12 +65,20 @@ def _assert_local_portal_auth_enabled(feature_name: str):
 
 def _get_oidc_settings() -> Dict[str, Any]:
     base_url = config.portal_oidc_base_url
+    well_known_url = config.portal_oidc_well_known_url
     client_id = config.portal_oidc_client_id
     client_secret = config.portal_oidc_client_secret
-    enabled = bool(config.portal_oidc_enabled and base_url and client_id and client_secret and config.cluster_role != "subnode")
+    enabled = bool(
+        config.portal_oidc_enabled
+        and (base_url or well_known_url)
+        and client_id
+        and client_secret
+        and config.cluster_role != "subnode"
+    )
     return {
         "enabled": enabled,
         "base_url": base_url,
+        "well_known_url": well_known_url,
         "client_id": client_id,
         "client_secret": client_secret,
         "scope": config.portal_oidc_scope,
@@ -191,6 +199,46 @@ async def _request_oidc_token(
         )
 
     raise HTTPException(status_code=502, detail=last_error_detail)
+
+
+async def _resolve_oidc_endpoints(settings: Dict[str, Any]) -> Dict[str, Any]:
+    resolved = dict(settings)
+    well_known_url = str(settings.get("well_known_url") or "").strip()
+    if not well_known_url:
+        return resolved
+
+    _, payload = await _oidc_http_request(
+        well_known_url,
+        method="GET",
+        headers={"Accept": "application/json"},
+    )
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="OIDC well-known 响应无效")
+
+    authorization_url = str(payload.get("authorization_endpoint") or "").strip()
+    token_url = str(payload.get("token_endpoint") or "").strip()
+    userinfo_url = str(payload.get("userinfo_endpoint") or "").strip()
+    issuer = str(payload.get("issuer") or "").strip().rstrip("/")
+
+    missing_fields = []
+    if not authorization_url:
+        missing_fields.append("authorization_endpoint")
+    if not token_url:
+        missing_fields.append("token_endpoint")
+    if not userinfo_url:
+        missing_fields.append("userinfo_endpoint")
+    if missing_fields:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OIDC well-known 缺少字段: {', '.join(missing_fields)}",
+        )
+
+    if issuer:
+        resolved["base_url"] = issuer
+    resolved["authorization_url"] = authorization_url
+    resolved["token_url"] = token_url
+    resolved["userinfo_url"] = userinfo_url
+    return resolved
 
 
 def _build_oidc_portal_username(base_url: str, subject: str) -> str:
@@ -560,7 +608,7 @@ async def portal_user_login(request: LoginRequest, response: Response):
 @router.get("/auth/oidc/start")
 async def portal_oidc_start(request: Request):
     _assert_portal_public_role("OIDC 登录")
-    settings = _get_oidc_settings()
+    settings = await _resolve_oidc_endpoints(_get_oidc_settings())
     if not settings["enabled"]:
         raise HTTPException(status_code=400, detail="当前未启用 OIDC 登录")
 
@@ -588,7 +636,7 @@ async def portal_oidc_callback(
     portal_oidc_state: Optional[str] = Cookie(default=None),
 ):
     _assert_portal_public_role("OIDC 登录")
-    settings = _get_oidc_settings()
+    settings = await _resolve_oidc_endpoints(_get_oidc_settings())
     portal_path = "/portal"
     if not settings["enabled"]:
         return RedirectResponse(url=f"{portal_path}?oidc_error={urllib.parse.quote('当前未启用 OIDC 登录')}", status_code=302)
