@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import secrets
 import time
@@ -117,6 +118,79 @@ async def _oidc_http_request(
         parsed = urllib.parse.parse_qs(text, keep_blank_values=True)
         return status, {key: values[-1] if values else "" for key, values in parsed.items()}
     return status, text
+
+
+async def _request_oidc_token(
+    token_url: str,
+    client_id: str,
+    client_secret: str,
+    code: str,
+    redirect_uri: str,
+) -> Dict[str, Any]:
+    common_body = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    auth_value = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
+    attempts = [
+        {
+            "name": "client_secret_basic",
+            "headers": {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "Authorization": f"Basic {auth_value}",
+            },
+            "body": urllib.parse.urlencode(common_body).encode("utf-8"),
+        },
+        {
+            "name": "client_secret_post",
+            "headers": {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            "body": urllib.parse.urlencode(
+                {
+                    **common_body,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                }
+            ).encode("utf-8"),
+        },
+    ]
+
+    last_error_detail = "OIDC token 响应无效"
+    for attempt in attempts:
+        try:
+            token_status, token_payload = await _oidc_http_request(
+                token_url,
+                method="POST",
+                headers=attempt["headers"],
+                body=attempt["body"],
+            )
+        except HTTPException as exc:
+            last_error_detail = str(exc.detail)
+            debug_logger.log_warning(
+                f"[portal_oidc] token exchange failed via {attempt['name']}: {exc.detail}"
+            )
+            continue
+
+        if 200 <= token_status < 300 and isinstance(token_payload, dict):
+            access_token = str(token_payload.get("access_token") or "").strip()
+            if access_token:
+                return token_payload
+            last_error_detail = "OIDC token 响应缺少 access_token"
+        else:
+            last_error_detail = (
+                f"OIDC token 响应异常 status={token_status}"
+                if not isinstance(token_payload, dict)
+                else str(token_payload.get("error_description") or token_payload.get("error") or f"OIDC token 响应异常 status={token_status}")
+            )
+        debug_logger.log_warning(
+            f"[portal_oidc] token exchange attempt rejected via {attempt['name']}: {last_error_detail}"
+        )
+
+    raise HTTPException(status_code=502, detail=last_error_detail)
 
 
 def _build_oidc_portal_username(base_url: str, subject: str) -> str:
@@ -525,24 +599,13 @@ async def portal_oidc_callback(
     if not state or not portal_oidc_state or state != portal_oidc_state:
         return RedirectResponse(url=f"{portal_path}?oidc_error={urllib.parse.quote('OIDC state 校验失败')}", status_code=302)
 
-    token_body = urllib.parse.urlencode(
-        {
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": settings["client_id"],
-            "client_secret": settings["client_secret"],
-            "redirect_uri": _build_portal_redirect_uri(request),
-        }
-    ).encode("utf-8")
-    token_status, token_payload = await _oidc_http_request(
-        settings["token_url"],
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-        body=token_body,
+    token_payload = await _request_oidc_token(
+        token_url=settings["token_url"],
+        client_id=settings["client_id"],
+        client_secret=settings["client_secret"],
+        code=code,
+        redirect_uri=_build_portal_redirect_uri(request),
     )
-    if token_status < 200 or token_status >= 300 or not isinstance(token_payload, dict):
-        raise HTTPException(status_code=502, detail="OIDC token 响应无效")
-
     access_token = str(token_payload.get("access_token") or "").strip()
     if not access_token:
         raise HTTPException(status_code=502, detail="OIDC token 响应缺少 access_token")
