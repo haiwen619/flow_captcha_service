@@ -6,10 +6,10 @@ import json
 import secrets
 import time
 import urllib.parse
-import urllib.request
 from hashlib import sha256
 from typing import Any, Dict, Optional
 
+from curl_cffi import requests as curl_requests
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 
@@ -148,23 +148,64 @@ def _sanitize_oidc_payload(payload: Any) -> Any:
     return payload
 
 
+def _build_oidc_browser_headers(extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    headers = {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Priority": "u=1, i",
+        "Sec-CH-UA": '"Google Chrome";v="134", "Chromium";v="134", "Not:A-Brand";v="24"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/134.0.0.0 Safari/537.36"
+        ),
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    return headers
+
+
+def _extract_origin(url: str) -> str:
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 async def _oidc_http_request(
     url: str,
     method: str = "GET",
     headers: Optional[Dict[str, str]] = None,
     body: Optional[bytes] = None,
 ) -> tuple[int, Any]:
-    sanitized_headers = _sanitize_oidc_headers(headers)
+    effective_headers = _build_oidc_browser_headers(headers)
+    sanitized_headers = _sanitize_oidc_headers(effective_headers)
     sanitized_body = _sanitize_oidc_body(body)
-    req = urllib.request.Request(url=url, data=body, headers=headers or {}, method=method.upper())
 
     def _send() -> tuple[int, str, str]:
-        with urllib.request.urlopen(req, timeout=20) as response:
+        response = curl_requests.request(
+            method=method.upper(),
+            url=url,
+            headers=effective_headers,
+            data=body,
+            timeout=20,
+            impersonate="chrome136",
+        )
+        try:
             return (
-                int(getattr(response, "status", 200)),
+                int(getattr(response, "status_code", 200)),
                 str(response.headers.get("Content-Type") or ""),
-                response.read().decode("utf-8", errors="replace"),
+                response.text,
             )
+        finally:
+            response.close()
 
     try:
         status, content_type, text = await asyncio.to_thread(_send)
@@ -207,25 +248,30 @@ async def _request_oidc_token(
         "code": code,
         "redirect_uri": redirect_uri,
     }
+    redirect_origin = _extract_origin(redirect_uri)
     masked_code = _mask_secret(code)
     masked_secret = _mask_secret(client_secret)
     auth_value = base64.b64encode(f"{client_id}:{client_secret}".encode("utf-8")).decode("ascii")
     attempts = [
         {
             "name": "client_secret_basic",
-            "headers": {
+            "headers": _build_oidc_browser_headers({
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
                 "Authorization": f"Basic {auth_value}",
-            },
+                "Origin": redirect_origin,
+                "Referer": redirect_uri,
+            }),
             "body": urllib.parse.urlencode(common_body).encode("utf-8"),
         },
         {
             "name": "client_secret_post",
-            "headers": {
+            "headers": _build_oidc_browser_headers({
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
-            },
+                "Origin": redirect_origin,
+                "Referer": redirect_uri,
+            }),
             "body": urllib.parse.urlencode(
                 {
                     **common_body,
