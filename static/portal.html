@@ -8,12 +8,10 @@
 </head>
 <body>
   <main class="portal-shell">
-    <section id="guestView" class="guest-home">
-      <div class="guest-auth-shell">
-        <div class="guest-auth-intro">
-          <span class="brand-chip solid">用户中心</span>
-          <h1>登录或注册</h1>
-          <p class="auth-desc">首页只保留账号入口。登录后再查看 API Key、次数明细和调用记录。</p>
+    <section id="guestView" class="guest-view">
+      <div class="guest-layout">
+        <div class="guest-copy">
+          <span class="brand-chip solid">用户控制台</span>
           <p id="authModeHint" class="mini-hint hidden-block"></p>
         </div>
 
@@ -37,7 +35,7 @@
               </label>
               <button class="btn primary wide" type="submit">登录账号</button>
             </form>
-            <div id="oidcLoginWrap" class="stack-form hidden-block">
+            <div id="oidcLoginWrap" class="stack-form hidden-block auth-divider">
               <button id="oidcLoginBtn" class="btn ghost wide" type="button">使用 OAuth2 / OIDC 登录</button>
               <p id="oidcLoginHint" class="mini-hint">已启用标准 OAuth2 / OIDC 登录。</p>
             </div>
@@ -63,34 +61,43 @@
     </section>
 
     <section id="appView" class="app-screen hidden-block">
-      <aside class="app-sidebar">
-        <header class="app-header">
-          <div class="app-brand">
-            <span class="brand-chip solid">用户控制台</span>
-            <div class="app-brand-copy">
-              <h1 id="headerTitle">欢迎回来</h1>
-              <p id="headerSubtitle" class="header-subtitle">这里只展示当前账号自己的信息与操作。</p>
-            </div>
+      <header class="mobile-header">
+        <div class="mobile-brand">
+          <span class="brand-chip">用户控制台</span>
+          <strong>flow_captcha_service</strong>
+        </div>
+        <button id="portalMenuBtn" class="btn ghost mini-btn" type="button" aria-expanded="false" aria-controls="portalSidebar">菜单</button>
+      </header>
+
+      <div id="portalMenuBackdrop" class="mobile-backdrop hidden-block" aria-hidden="true"></div>
+
+      <aside id="portalSidebar" class="app-sidebar">
+        <div class="sidebar-shell">
+          <div class="sidebar-brand">
+            <span class="brand-chip">用户控制台</span>
+            <h1 id="headerTitle">欢迎回来</h1>
+            <p id="headerSubtitle" class="header-subtitle">这里只展示当前账号自己的信息与操作。</p>
           </div>
 
-          <div class="app-userbar">
-            <div class="user-pill">
-              <label class="user-pill-label">当前账号</label>
-              <span id="headerUsername" title="--">--</span>
-              <small id="headerQuota">剩余次数 --</small>
-            </div>
-            <button id="logoutBtn" class="btn ghost" type="button">退出登录</button>
+          <div class="sidebar-user">
+            <span class="sidebar-user-label">当前账号</span>
+            <strong id="headerUsername" title="--">--</strong>
+            <small id="headerQuota">剩余次数 --</small>
           </div>
-        </header>
 
-        <nav class="app-nav">
-          <button class="nav-btn active" type="button" data-page="dashboard"><span class="nav-main">概览</span><span class="nav-meta">查看次数、成功率和最近兑换</span></button>
-          <button class="nav-btn" type="button" data-page="leaderboard"><span class="nav-main">排行榜</span><span class="nav-meta">单独查看当前站点用户使用排行</span></button>
-          <button class="nav-btn" type="button" data-page="apiKeys"><span class="nav-main">API Key</span><span class="nav-meta">申请、复制和管理个人密钥</span></button>
-          <button class="nav-btn" type="button" data-page="redeem"><span class="nav-main">充值中心</span><span class="nav-meta">兑换 CDK 并查看余额变动</span></button>
-          <button class="nav-btn" type="button" data-page="logs"><span class="nav-main">调用记录</span><span class="nav-meta">回看接口调用状态与失败原因</span></button>
-          <button class="nav-btn" type="button" data-page="account"><span class="nav-main">账号信息</span><span class="nav-meta">查看当前账号与配额信息</span></button>
-        </nav>
+          <nav class="app-nav">
+            <button class="nav-btn active" type="button" data-page="dashboard"><span class="nav-main">概览</span><span class="nav-meta">查看次数、成功率和最近兑换</span></button>
+            <button class="nav-btn" type="button" data-page="leaderboard"><span class="nav-main">排行榜</span><span class="nav-meta">查看当前站点用户使用排行</span></button>
+            <button class="nav-btn" type="button" data-page="apiKeys"><span class="nav-main">API Key</span><span class="nav-meta">申请、复制和管理个人密钥</span></button>
+            <button class="nav-btn" type="button" data-page="redeem"><span class="nav-main">充值中心</span><span class="nav-meta">兑换 CDK 并查看余额变动</span></button>
+            <button class="nav-btn" type="button" data-page="logs"><span class="nav-main">调用记录</span><span class="nav-meta">回看接口调用状态与失败原因</span></button>
+            <button class="nav-btn" type="button" data-page="account"><span class="nav-main">账号信息</span><span class="nav-meta">查看当前账号与配额信息</span></button>
+          </nav>
+
+          <div class="sidebar-footer">
+            <button id="logoutBtn" class="btn ghost wide" type="button">退出登录</button>
+          </div>
+        </div>
       </aside>
 
       <main class="app-main">
@@ -115,227 +122,226 @@
         <div id="appNotice" class="notice info hidden-block"></div>
 
         <section id="pageDashboard" class="page active">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">概览</div>
-            <h2>我的次数与使用情况</h2>
-          </div>
-          <button id="refreshUserBtn" class="btn subtle" type="button">刷新数据</button>
-        </div>
-
-        <div class="stats-grid">
-          <article class="stat-card"><div class="stat-k">剩余次数</div><div id="statQuotaRemaining" class="stat-v">--</div></article>
-          <article class="stat-card"><div class="stat-k">已用次数</div><div id="statQuotaUsed" class="stat-v">--</div></article>
-          <article class="stat-card"><div class="stat-k">成功次数</div><div id="statSolveSuccess" class="stat-v">--</div></article>
-          <article class="stat-card"><div class="stat-k">失败次数</div><div id="statSolveFailed" class="stat-v">--</div></article>
-          <article class="stat-card"><div class="stat-k">成功率</div><div id="statSuccessRate" class="stat-v">--</div></article>
-          <article class="stat-card"><div class="stat-k">最近请求</div><div id="statLastRequest" class="stat-v small">--</div></article>
-        </div>
-
-        <div class="info-band">
-          <span class="tag">扣次规则</span>
-          <span id="usageRuleText">最终生成成功才扣减 1 次；失败、取消或报错会返还次数。</span>
-        </div>
-
-        <section class="content-card">
-          <div class="section-head compact">
+          <div class="section-head">
             <div>
-              <div class="section-eyebrow">每日签到</div>
-              <h2>签到奖励</h2>
+              <div class="section-eyebrow">概览</div>
+              <h2>我的次数与使用情况</h2>
             </div>
-            <button id="checkinBtn" class="btn subtle" type="button">立即签到</button>
+            <button id="refreshUserBtn" class="btn subtle" type="button">刷新数据</button>
           </div>
-          <div id="checkinNotice" class="notice info">今日还未签到。</div>
-        </section>
 
-        <section class="content-card">
-          <div class="section-head compact">
-            <div>
-              <div class="section-eyebrow">最近兑换</div>
-              <h2>最近一次兑换结果</h2>
+          <div class="stats-grid">
+            <article class="stat-card"><div class="stat-k">剩余次数</div><div id="statQuotaRemaining" class="stat-v">--</div></article>
+            <article class="stat-card"><div class="stat-k">已用次数</div><div id="statQuotaUsed" class="stat-v">--</div></article>
+            <article class="stat-card"><div class="stat-k">成功次数</div><div id="statSolveSuccess" class="stat-v">--</div></article>
+            <article class="stat-card"><div class="stat-k">失败次数</div><div id="statSolveFailed" class="stat-v">--</div></article>
+            <article class="stat-card"><div class="stat-k">成功率</div><div id="statSuccessRate" class="stat-v">--</div></article>
+            <article class="stat-card"><div class="stat-k">最近请求</div><div id="statLastRequest" class="stat-v small">--</div></article>
+          </div>
+
+          <div class="info-band">
+            <span class="tag">扣次规则</span>
+            <span id="usageRuleText">最终生成成功才扣减 1 次；失败、取消或报错会返还次数。</span>
+          </div>
+
+          <section class="content-card">
+            <div class="section-head compact">
+              <div>
+                <div class="section-eyebrow">每日签到</div>
+                <h2>签到奖励</h2>
+              </div>
+              <button id="checkinBtn" class="btn subtle" type="button">立即签到</button>
             </div>
-          </div>
-          <div id="latestRedeemEmpty" class="empty-state">你还没有兑换记录。</div>
-          <div id="latestRedeemCard" class="redeem-summary hidden-block">
-            <div class="summary-item"><span>兑换码</span><strong id="latestRedeemCode">--</strong></div>
-            <div class="summary-item"><span>到账次数</span><strong id="latestRedeemQuota">--</strong></div>
-            <div class="summary-item"><span>兑换时间</span><strong id="latestRedeemTime">--</strong></div>
-          </div>
-        </section>
+            <div id="checkinNotice" class="notice info">今日还未签到。</div>
+          </section>
 
+          <section class="content-card">
+            <div class="section-head compact">
+              <div>
+                <div class="section-eyebrow">最近兑换</div>
+                <h2>最近一次兑换结果</h2>
+              </div>
+            </div>
+            <div id="latestRedeemEmpty" class="empty-state">你还没有兑换记录。</div>
+            <div id="latestRedeemCard" class="redeem-summary hidden-block">
+              <div class="summary-item"><span>兑换码</span><strong id="latestRedeemCode">--</strong></div>
+              <div class="summary-item"><span>到账次数</span><strong id="latestRedeemQuota">--</strong></div>
+              <div class="summary-item"><span>兑换时间</span><strong id="latestRedeemTime">--</strong></div>
+            </div>
+          </section>
         </section>
 
         <section id="pageLeaderboard" class="page">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">排行榜</div>
-            <h2>使用排行榜</h2>
+          <div class="section-head">
+            <div>
+              <div class="section-eyebrow">排行榜</div>
+              <h2>使用排行榜</h2>
+            </div>
           </div>
-        </div>
 
-        <section class="content-card">
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr><th>排名</th><th>用户</th><th>请求数</th><th>成功数</th><th>近 7 天</th><th>已用额度</th></tr>
-              </thead>
-              <tbody id="leaderboardTableBody">
-                <tr><td colspan="6" class="empty-cell">暂无排行数据。</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+          <section class="content-card">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>排名</th><th>用户</th><th>请求数</th><th>成功数</th><th>近 7 天</th><th>已用额度</th></tr>
+                </thead>
+                <tbody id="leaderboardTableBody">
+                  <tr><td colspan="6" class="empty-cell">暂无排行数据。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section id="pageApiKeys" class="page">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">API Key</div>
-            <h2>我的 API Key</h2>
-          </div>
-          <button id="refreshApiKeysBtn" class="btn subtle" type="button">刷新 Key</button>
-        </div>
-
-        <div class="content-card">
-          <form id="createApiKeyForm" class="stack-form narrow-form">
-            <label class="field">
-              <span>Key 名称</span>
-              <input id="newApiKeyName" placeholder="例如：prod-key" />
-            </label>
-            <button class="btn primary" type="submit">申请 API Key</button>
-          </form>
-          <div id="apiKeyNotice" class="notice info">用户可自助申请自己的 API Key。完整 Key 只在创建时返回，本页缓存后可再次复制。</div>
-        </div>
-
-        <div class="table-wrap content-card">
-          <table>
-            <thead>
-              <tr><th>名称</th><th>前缀</th><th>启用</th><th>已用次数</th><th>最后使用</th><th>操作</th></tr>
-            </thead>
-            <tbody id="apiKeysTableBody">
-              <tr><td colspan="6" class="empty-cell">暂无 API Key。</td></tr>
-            </tbody>
-          </table>
-        </div>
-        </section>
-
-        <section id="pageRedeem" class="page">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">充值中心</div>
-            <h2>充值与消费记录</h2>
-          </div>
-        </div>
-
-        <div class="content-card">
-          <form id="redeemForm" class="stack-form narrow-form">
-            <label class="field">
-              <span>兑换码 / CDK</span>
-              <input id="redeemCodeInput" placeholder="输入管理员发放的兑换码" autocomplete="off" />
-            </label>
-            <button class="btn primary" type="submit">立即兑换</button>
-          </form>
-          <div id="redeemNotice" class="notice info">兑换成功后会自动刷新当前用户的剩余次数。</div>
-        </div>
-
-        <section class="content-card">
-          <div class="section-head compact">
+          <div class="section-head">
             <div>
-              <div class="section-eyebrow">兑换记录</div>
-              <h2>最近兑换列表</h2>
+              <div class="section-eyebrow">API Key</div>
+              <h2>我的 API Key</h2>
             </div>
+            <button id="refreshApiKeysBtn" class="btn subtle" type="button">刷新 Key</button>
           </div>
-          <div class="table-wrap">
+
+          <div class="content-card">
+            <form id="createApiKeyForm" class="stack-form narrow-form">
+              <label class="field">
+                <span>Key 名称</span>
+                <input id="newApiKeyName" placeholder="例如：prod-key" />
+              </label>
+              <button class="btn primary" type="submit">申请 API Key</button>
+            </form>
+            <div id="apiKeyNotice" class="notice info">用户可自助申请自己的 API Key。完整 Key 只在创建时返回，本页缓存后可再次复制。</div>
+          </div>
+
+          <div class="table-wrap content-card">
             <table>
               <thead>
-                <tr><th>兑换码</th><th>次数</th><th>兑换时间</th><th>备注</th></tr>
+                <tr><th>名称</th><th>前缀</th><th>启用</th><th>已用次数</th><th>最后使用</th><th>操作</th></tr>
               </thead>
-              <tbody id="redeemTableBody">
-                <tr><td colspan="4" class="empty-cell">暂无兑换记录。</td></tr>
+              <tbody id="apiKeysTableBody">
+                <tr><td colspan="6" class="empty-cell">暂无 API Key。</td></tr>
               </tbody>
             </table>
           </div>
         </section>
 
-        <section class="content-card">
-          <div class="section-head compact">
+        <section id="pageRedeem" class="page">
+          <div class="section-head">
             <div>
-              <div class="section-eyebrow">消费记录</div>
-              <h2>次数变化明细</h2>
-            </div>
-            <div class="inline-actions">
-              <button id="copyTransactionsBtn" class="btn subtle" type="button">复制当前页</button>
+              <div class="section-eyebrow">充值中心</div>
+              <h2>充值与消费记录</h2>
             </div>
           </div>
-          <div class="table-wrap">
+
+          <div class="content-card">
+            <form id="redeemForm" class="stack-form narrow-form">
+              <label class="field">
+                <span>兑换码 / CDK</span>
+                <input id="redeemCodeInput" placeholder="输入管理员发放的兑换码" autocomplete="off" />
+              </label>
+              <button class="btn primary" type="submit">立即兑换</button>
+            </form>
+            <div id="redeemNotice" class="notice info">兑换成功后会自动刷新当前用户的剩余次数。</div>
+          </div>
+
+          <section class="content-card">
+            <div class="section-head compact">
+              <div>
+                <div class="section-eyebrow">兑换记录</div>
+                <h2>最近兑换列表</h2>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>兑换码</th><th>次数</th><th>兑换时间</th><th>备注</th></tr>
+                </thead>
+                <tbody id="redeemTableBody">
+                  <tr><td colspan="4" class="empty-cell">暂无兑换记录。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="content-card">
+            <div class="section-head compact">
+              <div>
+                <div class="section-eyebrow">消费记录</div>
+                <h2>次数变化明细</h2>
+              </div>
+              <div class="inline-actions">
+                <button id="copyTransactionsBtn" class="btn subtle" type="button">复制当前页</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>时间</th><th>变化</th><th>余额</th><th>来源</th><th>说明</th></tr>
+                </thead>
+                <tbody id="transactionsTableBody">
+                  <tr><td colspan="5" class="empty-cell">暂无消费记录。</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="pager">
+              <div id="transactionsPagerInfo" class="pager-info">暂无消费记录。</div>
+              <div class="pager-actions">
+                <button id="transactionsPrevBtn" class="btn ghost mini-btn" type="button">上一页</button>
+                <button id="transactionsNextBtn" class="btn ghost mini-btn" type="button">下一页</button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="pageLogs" class="page">
+          <div class="section-head">
+            <div>
+              <div class="section-eyebrow">调用记录</div>
+              <h2>我的 API 调用记录</h2>
+            </div>
+            <button id="refreshLogsBtn" class="btn subtle" type="button">刷新日志</button>
+          </div>
+
+          <div class="filters-bar">
+            <label class="field"><span>状态筛选</span><select id="logStatusFilter"><option value="">全部状态</option><option value="success">success</option><option value="success_master_dispatch">success_master_dispatch</option><option value="failed">failed</option><option value="finish:success">finish:success</option><option value="finish:failed">finish:failed</option><option value="finish:cancelled">finish:cancelled</option><option value="error_reported">error_reported</option></select></label>
+            <label class="field"><span>项目筛选</span><input id="logProjectFilter" placeholder="输入 project_id" /></label>
+          </div>
+
+          <div class="table-wrap content-card">
             <table>
               <thead>
-                <tr><th>时间</th><th>变化</th><th>余额</th><th>来源</th><th>说明</th></tr>
+                <tr><th>时间</th><th>状态</th><th>项目</th><th>动作</th><th>Key</th><th>错误原因</th></tr>
               </thead>
-              <tbody id="transactionsTableBody">
-                <tr><td colspan="5" class="empty-cell">暂无消费记录。</td></tr>
+              <tbody id="logsTableBody">
+                <tr><td colspan="6" class="empty-cell">暂无日志记录。</td></tr>
               </tbody>
             </table>
           </div>
           <div class="pager">
-            <div id="transactionsPagerInfo" class="pager-info">暂无消费记录。</div>
+            <div id="logsPagerInfo" class="pager-info">暂无日志记录。</div>
             <div class="pager-actions">
-              <button id="transactionsPrevBtn" class="btn ghost mini-btn" type="button">上一页</button>
-              <button id="transactionsNextBtn" class="btn ghost mini-btn" type="button">下一页</button>
+              <button id="logsPrevBtn" class="btn ghost mini-btn" type="button">上一页</button>
+              <button id="logsNextBtn" class="btn ghost mini-btn" type="button">下一页</button>
             </div>
           </div>
         </section>
-        </section>
-
-        <section id="pageLogs" class="page">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">调用记录</div>
-            <h2>我的 API 调用记录</h2>
-          </div>
-          <button id="refreshLogsBtn" class="btn subtle" type="button">刷新日志</button>
-        </div>
-
-        <div class="filters-bar">
-          <label class="field"><span>状态筛选</span><select id="logStatusFilter"><option value="">全部状态</option><option value="success">success</option><option value="success_master_dispatch">success_master_dispatch</option><option value="failed">failed</option><option value="finish:success">finish:success</option><option value="finish:failed">finish:failed</option><option value="finish:cancelled">finish:cancelled</option><option value="error_reported">error_reported</option></select></label>
-          <label class="field"><span>项目筛选</span><input id="logProjectFilter" placeholder="输入 project_id" /></label>
-        </div>
-
-        <div class="table-wrap content-card">
-          <table>
-            <thead>
-              <tr><th>时间</th><th>状态</th><th>项目</th><th>动作</th><th>Key</th><th>错误原因</th></tr>
-            </thead>
-            <tbody id="logsTableBody">
-              <tr><td colspan="6" class="empty-cell">暂无日志记录。</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="pager">
-          <div id="logsPagerInfo" class="pager-info">暂无日志记录。</div>
-          <div class="pager-actions">
-            <button id="logsPrevBtn" class="btn ghost mini-btn" type="button">上一页</button>
-            <button id="logsNextBtn" class="btn ghost mini-btn" type="button">下一页</button>
-          </div>
-        </div>
-        </section>
 
         <section id="pageAccount" class="page">
-        <div class="section-head">
-          <div>
-            <div class="section-eyebrow">账号信息</div>
-            <h2>当前登录账号</h2>
+          <div class="section-head">
+            <div>
+              <div class="section-eyebrow">账号信息</div>
+              <h2>当前登录账号</h2>
+            </div>
           </div>
-        </div>
 
-        <div class="account-grid">
-          <article class="account-card"><span>用户名</span><strong id="accountUsernameValue">--</strong></article>
-          <article class="account-card"><span>注册状态</span><strong id="accountRegisteredValue">已注册</strong></article>
-          <article class="account-card"><span>注册位置</span><strong id="accountLocationValue">--</strong></article>
-          <article class="account-card"><span>账号状态</span><strong id="accountEnabledValue">--</strong></article>
-          <article class="account-card"><span>创建时间</span><strong id="accountCreatedAtValue">--</strong></article>
-          <article class="account-card"><span>最后登录</span><strong id="accountLastLoginValue">--</strong></article>
-        </div>
+          <div class="account-grid">
+            <article class="account-card"><span>用户名</span><strong id="accountUsernameValue">--</strong></article>
+            <article class="account-card"><span>注册状态</span><strong id="accountRegisteredValue">已注册</strong></article>
+            <article class="account-card"><span>注册位置</span><strong id="accountLocationValue">--</strong></article>
+            <article class="account-card"><span>账号状态</span><strong id="accountEnabledValue">--</strong></article>
+            <article class="account-card"><span>创建时间</span><strong id="accountCreatedAtValue">--</strong></article>
+            <article class="account-card"><span>最后登录</span><strong id="accountLastLoginValue">--</strong></article>
+          </div>
         </section>
       </main>
     </section>
