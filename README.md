@@ -1,5 +1,11 @@
 # flow_captcha_service
 
+161.8.161.213:11078:7WJxtAzAyw:123123
+
+
+& \.venv\Scripts\Activate.ps1
+python main.py
+
 `flow_captcha_service` 是给 `flow2api` 使用的自托管打码服务。
 
 它的目标不是接第三方打码平台，而是自己托管 `Playwright + Chromium`

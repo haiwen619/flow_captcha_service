@@ -166,6 +166,7 @@ class Config:
                 "browser_recaptcha_settle_seconds": 3,
                 "browser_score_test_warmup_seconds": 12,
                 "browser_idle_ttl_seconds": 600,
+                "browser_solve_max_retries": 0,
                 "flow_timeout": 300,
                 "upsample_timeout": 300,
                 "session_ttl_seconds": 1200,
@@ -405,6 +406,13 @@ class Config:
             return max(60, int(self._get("captcha", "browser_idle_ttl_seconds", 600)))
         except Exception:
             return 600
+
+    @property
+    def browser_solve_max_retries(self) -> int:
+        try:
+            return max(0, int(self._get("captcha", "browser_solve_max_retries", 0)))
+        except Exception:
+            return 0
 
     @property
     def flow_timeout(self) -> int:

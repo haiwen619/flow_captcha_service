@@ -10,3 +10,4 @@ data/*.db-*
 playwright-report/
 
 data/setting.toml
+/.vs

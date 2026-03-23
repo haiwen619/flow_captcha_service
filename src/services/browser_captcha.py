@@ -226,8 +226,24 @@ def parse_proxy_url(proxy_url: str) -> Optional[Dict[str, str]]:
         return proxy_config
     return None
 
+def _convert_host_port_user_pass(proxy_url: str) -> str:
+    """将 host:port:user:pass 格式转换为标准 http://user:pass@host:port 格式。"""
+    if re.match(r'^(http|https|socks5)://', proxy_url):
+        return proxy_url
+    parts = proxy_url.split(":")
+    if len(parts) == 4 and parts[1].isdigit():
+        host, port, username, password = parts
+        return f"http://{username}:{password}@{host}:{port}"
+    return proxy_url
+
+
 def normalize_browser_proxy_url(proxy_url: str) -> tuple[Optional[str], Optional[str]]:
     """将浏览器代理标准化为 Playwright/Chromium 可接受的格式。
+
+    支持以下输入格式：
+    - 标准 URL：http://user:pass@host:port 或 socks5://user:pass@host:port
+    - 短格式：host:port（无认证）
+    - 导入格式：host:port:user:pass
 
     Chromium 不支持带账号密码的 socks5 代理认证。
     对于 `socks5://user:pass@host:port`，自动降级为 `http://user:pass@host:port`，
@@ -240,6 +256,7 @@ def normalize_browser_proxy_url(proxy_url: str) -> tuple[Optional[str], Optional
         return None, None
 
     proxy_url = proxy_url.strip()
+    proxy_url = _convert_host_port_user_pass(proxy_url)
     match = re.match(r'^(socks5|http|https)://(?:([^:]+):([^@]+)@)?([^:]+):(\d+)$', proxy_url)
     if not match:
         if not re.match(r'^(http|https|socks5)://', proxy_url):
@@ -1492,7 +1509,7 @@ class TokenBrowser:
         """Get a token from the shared browser unless a fatal browser error occurs."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_solve_max_retries + 1
 
             try:
                 for attempt in range(max_retries):
@@ -1553,7 +1570,7 @@ class TokenBrowser:
         """Get a custom reCAPTCHA token using a temporary browser."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_solve_max_retries + 1
 
             try:
                 for attempt in range(max_retries):
@@ -1616,7 +1633,7 @@ class TokenBrowser:
         """Get a custom token and verify its score using a temporary browser."""
         async with self._semaphore:
             self._solve_inflight += 1
-            max_retries = 3
+            max_retries = config.browser_solve_max_retries + 1
 
             try:
                 for attempt in range(max_retries):
