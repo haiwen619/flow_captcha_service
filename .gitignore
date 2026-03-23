@@ -11,3 +11,4 @@ playwright-report/
 
 data/setting.toml
 /.vs
+/tmp/browser_pids

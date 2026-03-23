@@ -4,6 +4,39 @@
 
 ---
 
+$env:HTTPS_PROXY = "http://127.0.0.1:10810"
+$env:HTTP_PROXY  = "http://127.0.0.1:10810"
+cloudflared tunnel --url http://localhost:8060
+
+
+# 清除代理变量
+Remove-Item Env:ALL_PROXY   -ErrorAction SilentlyContinue
+Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+Remove-Item Env:HTTP_PROXY  -ErrorAction SilentlyContinue
+
+# 直接运行，TUN 模式会自动将流量路由到美国节点
+cloudflared tunnel --protocol http2 --url http://localhost:8060
+
+
+# 用 PID 结束进程（替换 12345 为实际 PID）
+taskkill /PID 4832 /F
+
+
+# 或者一条命令直接搞定：解除端口占用 
+```powershell
+$pid = (netstat -ano | findstr ":8060 " | findstr "LISTENING" | ForEach-Object { ($_ -split '\s+')[-1] } | Select-Object -First 1); if ($pid) { taskkill /PID $pid /F }
+
+
+是的，直接改端口就可以：
+
+Remove-Item Env:ALL_PROXY   -ErrorAction SilentlyContinue
+Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+Remove-Item Env:HTTP_PROXY  -ErrorAction SilentlyContinue
+
+cloudflared tunnel --protocol http2 --url http://localhost:8000
+
+
+
 ## 一、项目启动流程
 
 ### 1.1 入口 `src/main.py`
