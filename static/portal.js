@@ -76,6 +76,28 @@ const dom = {
   },
 };
 
+function setPortalMenuOpen(open) {
+  const sidebar = dom.byId("portalSidebar");
+  const backdrop = dom.byId("portalMenuBackdrop");
+  const menuButton = dom.byId("portalMenuBtn");
+  const shouldOpen = !!open && isAuthenticated();
+
+  document.body.classList.toggle("portal-menu-open", shouldOpen);
+  sidebar?.classList.toggle("show", shouldOpen);
+  showBlock("portalMenuBackdrop", shouldOpen);
+
+  if (backdrop) {
+    backdrop.setAttribute("aria-hidden", shouldOpen ? "false" : "true");
+  }
+  if (menuButton) {
+    menuButton.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+  }
+}
+
+function closePortalMenu() {
+  setPortalMenuOpen(false);
+}
+
 function setText(id, value) {
   const element = dom.byId(id);
   if (element) {
@@ -311,6 +333,7 @@ function switchPage(page) {
   setText("workspaceTitle", meta.title);
   setText("workspaceDesc", meta.desc);
   setText("workspacePage", meta.shortTitle);
+  closePortalMenu();
 }
 
 function renderShell() {
@@ -321,6 +344,7 @@ function renderShell() {
   if (!authenticated) {
     closeApiKeyModal();
     showBlock("appNotice", false);
+    closePortalMenu();
   }
 }
 
@@ -817,6 +841,7 @@ async function handleLogout() {
   resetTransactionsState();
   resetLogsState();
   closeApiKeyModal();
+  closePortalMenu();
   renderShell();
   renderAuthTab("login");
   showNotice("guestNotice", "你已退出登录。", "info");
@@ -946,6 +971,21 @@ async function handleCopyTransactionsCurrentPage() {
 function wireEvents() {
   dom.byId("tabLoginBtn")?.addEventListener("click", () => renderAuthTab("login"));
   dom.byId("tabRegisterBtn")?.addEventListener("click", () => renderAuthTab("register"));
+  dom.byId("portalMenuBtn")?.addEventListener("click", () => {
+    const isOpen = dom.byId("portalSidebar")?.classList.contains("show");
+    setPortalMenuOpen(!isOpen);
+  });
+  dom.byId("portalMenuBackdrop")?.addEventListener("click", closePortalMenu);
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 1080) {
+      closePortalMenu();
+    }
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closePortalMenu();
+    }
+  });
 
   dom.byId("loginForm")?.addEventListener("submit", async (event) => {
     try {

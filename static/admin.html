@@ -6,25 +6,25 @@
   <title>flow_captcha_service 管理后台</title>
   <style>
     :root{
-      --bg:#08111f;
-      --panel:rgba(11,22,38,.92);
-      --line:rgba(148,163,184,.16);
-      --text:#e5eefb;
-      --muted:#9cb1ca;
-      --primary:#3b82f6;
+      --bg:#0b0d13;
+      --panel:rgba(19,23,34,.92);
+      --line:rgba(231,235,245,.1);
+      --text:#e7ebf5;
+      --muted:#9099ad;
+      --primary:#fb7185;
       --ok:rgba(34,197,94,.12);
       --warn:rgba(245,158,11,.12);
-      --err:rgba(244,63,94,.12);
-      --shadow:0 20px 60px rgba(2,6,23,.36);
+      --err:rgba(251,113,133,.12);
+      --shadow:0 28px 68px rgba(3,7,18,.36);
     }
     *{box-sizing:border-box}
     body{
       margin:0;
       color:var(--text);
       background:
-        radial-gradient(1100px 480px at -10% -10%, rgba(59,130,246,.24), transparent 58%),
-        radial-gradient(900px 360px at 110% 0%, rgba(34,197,94,.12), transparent 54%),
-        linear-gradient(180deg,#08111f 0%,#0b1524 55%,#0d1728 100%);
+        radial-gradient(1100px 480px at -10% -10%, rgba(251,113,133,.18), transparent 58%),
+        radial-gradient(900px 360px at 110% 0%, rgba(245,158,11,.08), transparent 54%),
+        linear-gradient(180deg,#0b0d13 0%,#0d1018 55%,#121624 100%);
       font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
       min-height:100vh;
     }
@@ -50,8 +50,8 @@
       height:14px;
       margin-top:9px;
       border-radius:999px;
-      background:linear-gradient(135deg,#2563eb,#0ea5e9);
-      box-shadow:0 0 0 6px rgba(37,99,235,.12);
+      background:linear-gradient(135deg,#fb7185,#f97316);
+      box-shadow:0 0 0 6px rgba(251,113,133,.12);
       flex:none;
     }
     .title{
@@ -171,17 +171,17 @@
       display:none;
     }
     .nav-tab:hover{
-      border-color:rgba(96,165,250,.26);
-      background:rgba(17,36,62,.7);
+      border-color:rgba(251,113,133,.24);
+      background:rgba(58,20,27,.56);
     }
     .nav-tab.active{
       color:#f8fbff;
-      background:rgba(37,99,235,.18);
-      border-color:rgba(96,165,250,.38);
-      box-shadow:inset 0 0 0 1px rgba(96,165,250,.22);
+      background:rgba(251,113,133,.12);
+      border-color:rgba(251,113,133,.3);
+      box-shadow:inset 0 0 0 1px rgba(251,113,133,.18);
     }
     .nav-tab.active::before{
-      background:#60a5fa;
+      background:#fb7185;
     }
     .sidebar-summary{
       margin-top:10px;
@@ -556,8 +556,8 @@
       width:8px;
       height:8px;
       border-radius:999px;
-      background:#2563eb;
-      box-shadow:0 0 0 6px rgba(37,99,235,.12);
+      background:#fb7185;
+      box-shadow:0 0 0 6px rgba(251,113,133,.12);
       flex:none;
     }
     .workspace-eyebrow{
@@ -631,7 +631,7 @@
     }
     .toolbar-kicker{
       font-size:11px;
-      color:#2563eb;
+      color:#fb7185;
       letter-spacing:.08em;
       font-weight:700;
       text-transform:uppercase;
@@ -1029,9 +1029,9 @@
       grid-column:1 / -1;
       padding:8px 10px;
       border-radius:12px;
-      border:1px solid rgba(96,165,250,.18);
-      background:rgba(14,30,52,.74);
-      color:#dbeafe;
+      border:1px solid rgba(251,113,133,.18);
+      background:rgba(44,16,24,.7);
+      color:#ffd4db;
       font-size:10px;
       font-weight:700;
       white-space:nowrap;
@@ -1060,19 +1060,19 @@
     .timeline-item,
     .modal-card{
       border-color:var(--line);
-      background:linear-gradient(180deg,rgba(11,22,38,.96),rgba(11,22,38,.9));
+      background:linear-gradient(180deg,rgba(18,23,34,.96),rgba(18,23,34,.9));
       box-shadow:var(--shadow);
     }
     .topbar{
       background:
-        radial-gradient(560px 180px at 0% 0%, rgba(59,130,246,.14), transparent 72%),
-        linear-gradient(180deg,rgba(11,22,38,.95),rgba(11,22,38,.88));
+        radial-gradient(560px 180px at 0% 0%, rgba(251,113,133,.12), transparent 72%),
+        linear-gradient(180deg,rgba(18,23,34,.95),rgba(18,23,34,.88));
     }
     .nav-tabs{
       border-color:rgba(148,163,184,.16);
       background:
-        radial-gradient(760px 260px at 0% 0%, rgba(59,130,246,.16), transparent 72%),
-        linear-gradient(180deg,#08111f 0%,#0b1524 48%,#0d1728 100%);
+        radial-gradient(760px 260px at 0% 0%, rgba(251,113,133,.14), transparent 72%),
+        linear-gradient(180deg,#0b0d13 0%,#0d1018 48%,#121624 100%);
       box-shadow:var(--shadow);
     }
     .login-hero,
@@ -1080,8 +1080,8 @@
     .drawer-head{
       border-color:rgba(148,163,184,.12);
       background:
-        radial-gradient(560px 180px at 0% 0%, rgba(59,130,246,.14), transparent 72%),
-        linear-gradient(180deg,rgba(11,22,38,.95),rgba(11,22,38,.88));
+        radial-gradient(560px 180px at 0% 0%, rgba(251,113,133,.12), transparent 72%),
+        linear-gradient(180deg,rgba(18,23,34,.95),rgba(18,23,34,.88));
     }
     .title,
     .workspace-title,
@@ -1125,14 +1125,14 @@
     .role-badge,
     .toolbar-badge,
     .workspace-eyebrow{
-      color:#dbeafe;
-      border-color:rgba(96,165,250,.18);
-      background:rgba(59,130,246,.12);
+      color:#ffd4db;
+      border-color:rgba(251,113,133,.18);
+      background:rgba(251,113,133,.1);
     }
     .portal-link{
-      color:#dbeafe;
+      color:#eef1f8;
       border-color:rgba(148,163,184,.18);
-      background:rgba(15,23,42,.58);
+      background:rgba(255,255,255,.04);
       padding:8px 10px;
       border-radius:12px;
       font-size:11px;
@@ -1140,13 +1140,13 @@
     }
     button{
       color:#fff;
-      background:linear-gradient(135deg,#2563eb,#3b82f6);
-      box-shadow:0 12px 28px rgba(37,99,235,.25);
+      background:linear-gradient(135deg,#fb7185,#f43f5e);
+      box-shadow:0 12px 28px rgba(251,113,133,.2);
     }
     button.secondary{
-      color:#dbeafe;
+      color:#eef1f8;
       border-color:rgba(148,163,184,.18);
-      background:rgba(15,23,42,.58);
+      background:rgba(255,255,255,.04);
       box-shadow:none;
       border-radius:12px;
       padding:8px 10px;
@@ -1171,8 +1171,8 @@
     .field input:focus,
     .field select:focus,
     .field textarea:focus{
-      border-color:rgba(96,165,250,.48);
-      box-shadow:0 0 0 4px rgba(96,165,250,.12);
+      border-color:rgba(251,113,133,.42);
+      box-shadow:0 0 0 4px rgba(251,113,133,.12);
     }
     .code-preview{
       background:rgba(8,17,32,.72);
@@ -1182,7 +1182,7 @@
       background:rgba(8,17,32,.46);
     }
     details.advanced>summary{
-      color:#dbeafe;
+      color:#ffd4db;
     }
     .card .k,
     .toolbar-kicker,
@@ -1209,8 +1209,8 @@
     }
     .cluster-panel{
       background:
-        radial-gradient(640px 200px at 0% 0%, rgba(59,130,246,.16), transparent 70%),
-        linear-gradient(180deg,rgba(11,22,38,.96),rgba(11,22,38,.9));
+        radial-gradient(640px 200px at 0% 0%, rgba(251,113,133,.14), transparent 70%),
+        linear-gradient(180deg,rgba(18,23,34,.96),rgba(18,23,34,.9));
     }
     .cluster-table th{
       background:rgba(15,23,42,.82);
@@ -1220,7 +1220,7 @@
       background:rgba(148,163,184,.03);
     }
     .cluster-table tbody tr:hover{
-      background:rgba(59,130,246,.08);
+      background:rgba(251,113,133,.08);
     }
     .node-id,
     .metric-chip,
@@ -1387,20 +1387,542 @@
       body.admin-authenticated .workspace-head{padding:18px 16px}
       body.admin-authenticated .page{padding:16px}
     }
+
+    :root{
+      --primary:#6d73ff;
+      --shadow:0 28px 68px rgba(3,7,18,.36);
+    }
+
+    body{
+      color:#e7ebf5;
+      background:
+        radial-gradient(1100px 480px at -10% -10%, rgba(109,115,255,.18), transparent 58%),
+        radial-gradient(900px 360px at 110% 0%, rgba(63,210,139,.08), transparent 54%),
+        linear-gradient(180deg,#0b0d13 0%,#0d1018 55%,#121624 100%);
+    }
+
+    .topbar,
+    #loginPanel,
+    .panel,
+    .card,
+    .workspace-head,
+    .workspace-meta-item,
+    .table-toolbar,
+    .cluster-wrap,
+    .cluster-kpi,
+    .cluster-result,
+    .overview-chart,
+    .chart-host,
+    .drawer,
+    .timeline-item,
+    .modal-card{
+      border-color:rgba(231,235,245,.1);
+      background:linear-gradient(180deg,rgba(22,26,38,.96),rgba(22,26,38,.9));
+      box-shadow:var(--shadow);
+    }
+
+    .title,
+    .workspace-title,
+    .toolbar-title,
+    .panel h2,
+    .card .v,
+    .cluster-kpi .v,
+    .modal-head h3,
+    .drawer-head h3,
+    .workspace-meta-item .value,
+    .node-name,
+    .status-badge,
+    .table-toolbar .toolbar-note strong{
+      color:#f6f8fc;
+    }
+
+    .subtitle,
+    .panel-desc,
+    .toolbar-desc,
+    .toolbar-note,
+    .workspace-desc,
+    .workspace-breadcrumb,
+    .workspace-meta-item .label,
+    .inline-note,
+    .pager-info,
+    .field .hint,
+    .cluster-kpi .k,
+    .cluster-kpi .s,
+    .cluster-result,
+    .summary-label,
+    .summary-note,
+    .modal-meta,
+    .time-cell,
+    .overview-chart .k,
+    .chart-empty{
+      color:#9099ad;
+    }
+
+    .field label,
+    .checkbox-line{
+      color:#dbeafe;
+    }
+
+    .role-badge,
+    .toolbar-badge,
+    .workspace-eyebrow{
+      color:#d8dcff;
+      border-color:rgba(109,115,255,.18);
+      background:rgba(109,115,255,.1);
+    }
+
+    .portal-link{
+      color:#d6dbeb;
+      border-color:rgba(231,235,245,.1);
+      background:rgba(255,255,255,.03);
+      border-radius:16px;
+      font-size:12px;
+      min-height:40px;
+      padding:0 14px;
+    }
+
+    button{
+      border-radius:16px;
+      background:linear-gradient(135deg,#5961ec,#6d73ff);
+      box-shadow:0 18px 36px rgba(89,97,236,.22);
+    }
+
+    button.secondary{
+      color:#d6dbeb;
+      border-color:rgba(231,235,245,.1);
+      background:rgba(255,255,255,.03);
+      box-shadow:none;
+      border-radius:16px;
+      min-height:40px;
+      padding:0 14px;
+      font-size:12px;
+    }
+
+    button.warn{
+      background:linear-gradient(135deg,#c2410c,#ea580c);
+    }
+
+    .field input,
+    .field select,
+    .field textarea,
+    .input-mini,
+    .code-preview{
+      border-color:rgba(231,235,245,.1);
+      background:#10131c;
+      color:#f6f8fc;
+      border-radius:16px;
+    }
+
+    .field input::placeholder,
+    .field textarea::placeholder{
+      color:#686f80;
+    }
+
+    .field input:focus,
+    .field select:focus,
+    .field textarea:focus{
+      border-color:rgba(109,115,255,.42);
+      box-shadow:0 0 0 4px rgba(109,115,255,.12);
+    }
+
+    .status-badge{
+      border-color:rgba(231,235,245,.1);
+      background:rgba(255,255,255,.03);
+      color:#dbeafe;
+    }
+
+    .notice.ok{background:rgba(63,210,139,.08);border-color:rgba(63,210,139,.16);color:#b8efd0}
+    .notice.warn{background:rgba(241,179,83,.1);border-color:rgba(241,179,83,.18);color:#f7ddb0}
+    .notice.err{background:rgba(255,112,134,.08);border-color:rgba(255,112,134,.18);color:#ffc4ce}
+
+    th{
+      color:#8e97aa;
+      background:rgba(255,255,255,.02);
+    }
+    td{
+      color:#e7ebf5;
+    }
+
+    .card{
+      border-radius:22px;
+      background:rgba(18,23,35,.76);
+    }
+
+    .card .k,
+    .toolbar-kicker,
+    .nav-group-label{
+      color:#8e97aa;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+    }
+
+    .workspace-breadcrumb::before{
+      background:#6d73ff;
+      box-shadow:0 0 0 6px rgba(109,115,255,.12);
+    }
+
+    .workspace-eyebrow{
+      border-radius:999px;
+    }
+
+    body:not(.admin-authenticated) .container{
+      width:min(560px,calc(100vw - 32px));
+      min-height:100vh;
+      margin:0 auto;
+      padding:24px 0 32px;
+      display:grid;
+      align-content:center;
+      gap:24px;
+    }
+
+    body:not(.admin-authenticated) .topbar{
+      display:none;
+    }
+
+    body:not(.admin-authenticated) .brand{
+      display:grid;
+      justify-items:center;
+      gap:10px;
+    }
+
+    body:not(.admin-authenticated) .brand > div{
+      display:grid;
+      justify-items:center;
+      gap:14px;
+    }
+
+    body:not(.admin-authenticated) .brand-dot{
+      display:none;
+    }
+
+    body:not(.admin-authenticated) .login-kicker{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:fit-content;
+      padding:8px 12px;
+      border-radius:999px;
+      border:1px solid rgba(109,115,255,.24);
+      background:rgba(109,115,255,.08);
+      color:#c6ccff;
+      font-size:11px;
+      font-weight:800;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+    }
+
+    body:not(.admin-authenticated) .title{
+      margin:0;
+      font-size:clamp(28px,4.8vw,48px);
+      line-height:1;
+      letter-spacing:-.05em;
+      text-wrap:unset;
+      color:#f6f8fc;
+    }
+
+    body:not(.admin-authenticated) .topbar-side{
+      display:none;
+    }
+
+    body:not(.admin-authenticated) .role-badge{
+      display:none;
+    }
+
+    body:not(.admin-authenticated) #notice,
+    body:not(.admin-authenticated) #envNotice{
+      margin:0;
+    }
+
+    body:not(.admin-authenticated) #loginPanel{
+      max-width:none;
+      margin:0;
+      padding:28px;
+      border-radius:30px;
+      overflow:visible;
+      background:
+        radial-gradient(520px 180px at 0% 0%, rgba(109,115,255,.12), transparent 72%),
+        rgba(22,26,38,.9);
+    }
+
+    body:not(.admin-authenticated) .login-hero{
+      padding:0 0 18px;
+      border-bottom:none;
+      background:none;
+    }
+
+    body:not(.admin-authenticated) .login-hero h2{
+      margin:0;
+      font-size:24px;
+      line-height:1.08;
+      letter-spacing:-.04em;
+      color:#f6f8fc;
+    }
+
+    body:not(.admin-authenticated) #loginPanel .field label{
+      font-size:11px;
+      font-weight:700;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+      color:#8e97aa;
+    }
+
+    body:not(.admin-authenticated) #loginPanel .field input{
+      min-height:48px;
+      padding:12px 14px;
+      border-radius:16px;
+      font-size:16px;
+    }
+
+    body:not(.admin-authenticated) .login-body{
+      padding:18px 0 0;
+    }
+
+    body:not(.admin-authenticated) .login-grid{
+      grid-template-columns:1fr;
+      gap:14px;
+    }
+
+    body:not(.admin-authenticated) .login-actions{
+      margin-top:18px;
+    }
+
+    body:not(.admin-authenticated) .login-actions button{
+      width:100%;
+      min-height:44px;
+      padding:0 16px;
+      font-size:14px;
+      font-weight:700;
+      border-radius:16px;
+    }
+
+    body.admin-authenticated #dashboard{
+      background:#0c1018;
+      grid-template-columns:minmax(280px,300px) minmax(0,1fr);
+    }
+
+    body.admin-authenticated #dashboardNav{
+      padding:28px 20px;
+      border-right:1px solid rgba(231,235,245,.1);
+      background:rgba(10,12,17,.92);
+      gap:18px;
+    }
+
+    body.admin-authenticated .sidebar-head{
+      gap:12px;
+      padding:0 0 8px;
+      border-bottom:none;
+    }
+
+    body.admin-authenticated .sidebar-kicker{
+      display:inline-flex;
+      width:fit-content;
+      padding:8px 12px;
+      border-radius:999px;
+      border:1px solid rgba(109,115,255,.18);
+      background:rgba(109,115,255,.08);
+      color:#c6ccff;
+      font-size:11px;
+      letter-spacing:.14em;
+      text-transform:uppercase;
+    }
+
+    body.admin-authenticated .sidebar-title{
+      font-size:30px;
+      line-height:1.04;
+      letter-spacing:-.04em;
+      color:#f6f8fc;
+    }
+
+    body.admin-authenticated .sidebar-desc{
+      font-size:13px;
+      line-height:1.7;
+      color:#9099ad;
+      white-space:normal;
+    }
+
+    body.admin-authenticated .sidebar-repo{
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid rgba(231,235,245,.1);
+      background:rgba(255,255,255,.03);
+      color:#d6dbeb;
+      font-size:11px;
+    }
+
+    body.admin-authenticated .sidebar-head-actions{
+      grid-template-columns:1fr;
+      gap:10px;
+    }
+
+    body.admin-authenticated .sidebar-role-pill{
+      justify-content:flex-start;
+      min-height:44px;
+      padding:0 14px;
+      border-radius:16px;
+      border:1px solid rgba(109,115,255,.18);
+      background:rgba(109,115,255,.08);
+      color:#d8dcff;
+      font-size:12px;
+      text-transform:none;
+    }
+
+    body.admin-authenticated .nav-group{
+      gap:8px;
+    }
+
+    body.admin-authenticated .nav-group + .nav-group{
+      margin-top:0;
+      padding-top:14px;
+      border-top:1px solid rgba(231,235,245,.08);
+    }
+
+    body.admin-authenticated .nav-tab{
+      position:relative;
+      min-height:52px;
+      padding:12px 16px 12px 20px;
+      border-radius:18px;
+      border:1px solid transparent;
+      background:transparent;
+      color:#9098ab;
+    }
+
+    body.admin-authenticated .nav-tab::before{
+      position:absolute;
+      left:0;
+      top:10px;
+      bottom:10px;
+      width:3px;
+      height:auto;
+      background:transparent;
+      border-radius:999px;
+    }
+
+    body.admin-authenticated .nav-tab:hover{
+      background:rgba(255,255,255,.03);
+      border-color:transparent;
+      color:#e7ebf5;
+    }
+
+    body.admin-authenticated .nav-tab.active{
+      background:rgba(255,255,255,.04);
+      border-color:transparent;
+      color:#f6f8fc;
+      box-shadow:none;
+    }
+
+    body.admin-authenticated .nav-tab.active::before{
+      background:#6d73ff;
+    }
+
+    body.admin-authenticated .nav-main{
+      font-size:14px;
+      font-weight:700;
+      line-height:1.2;
+    }
+
+    body.admin-authenticated .nav-meta{
+      display:none;
+    }
+
+    body.admin-authenticated .nav-tab{
+      min-height:46px;
+    }
+
+    body.admin-authenticated .sidebar-summary{
+      padding:16px;
+      border:1px solid rgba(231,235,245,.1);
+      border-radius:22px;
+      background:#10131c;
+    }
+
+    body.admin-authenticated .workspace-head{
+      margin:20px 20px 0;
+      padding:24px;
+      border:1px solid rgba(231,235,245,.1);
+      border-radius:30px;
+      background:
+        radial-gradient(520px 180px at 0% 0%, rgba(109,115,255,.1), transparent 72%),
+        rgba(22,26,38,.82);
+      box-shadow:var(--shadow);
+    }
+
+    body.admin-authenticated .page{
+      padding:22px 20px 36px;
+      background:transparent;
+    }
+
+    body.admin-authenticated .panel{
+      border-radius:30px;
+      padding:22px;
+    }
+
+    body.admin-authenticated .cards .card{
+      border-radius:22px;
+      padding:20px;
+    }
+
+    body.admin-authenticated .workspace-meta{
+      gap:12px;
+    }
+
+    @media (max-width:1180px){
+      body:not(.admin-authenticated) .container{
+        width:min(560px,calc(100vw - 24px));
+      }
+
+      body.admin-authenticated #dashboard{
+        grid-template-columns:1fr;
+      }
+
+      body.admin-authenticated #dashboardNav{
+        padding:18px;
+        border-right:none;
+        border-bottom:1px solid rgba(231,235,245,.1);
+      }
+
+      body.admin-authenticated .workspace-head{
+        margin:18px 18px 0;
+      }
+
+      body.admin-authenticated .page{
+        padding:18px;
+      }
+    }
+
+    @media (max-width:640px){
+      body:not(.admin-authenticated) .container{
+        width:min(100vw - 20px,100%);
+        padding:16px 0 28px;
+      }
+
+      body:not(.admin-authenticated) .title{
+        font-size:34px;
+      }
+
+      body:not(.admin-authenticated) #loginPanel{
+        padding:20px;
+        border-radius:24px;
+      }
+
+      body.admin-authenticated .workspace-head{
+        margin:16px 16px 0;
+        padding:18px;
+        border-radius:24px;
+      }
+
+      body.admin-authenticated .panel,
+      body.admin-authenticated .cards .card{
+        border-radius:24px;
+        padding:18px;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="topbar">
-      <div class="brand">
-        <div class="brand-dot" aria-hidden="true"></div>
-        <div>
-          <h1 class="title">flow_captcha_service 管理后台</h1>
-          <p class="subtitle">简化配置、中文提示、按角色展示：主节点/子节点/单机模式</p>
-        </div>
-      </div>
+      <div class="brand"></div>
       <div class="topbar-side">
-        <a class="portal-link" href="/">公共页面</a>
         <div id="roleBadge" class="role-badge">当前角色：未登录</div>
       </div>
     </div>
@@ -1411,7 +1933,6 @@
     <section id="loginPanel" class="panel panel-login">
       <div class="login-hero">
         <h2>管理员登录</h2>
-        <p class="panel-desc">默认首次账号通常为 admin / admin，登录后建议立即修改。</p>
       </div>
       <div class="login-body">
         <div class="grid login-grid">
@@ -1432,7 +1953,6 @@
             <a class="sidebar-repo" href="https://github.com/genz27/flow_captcha_service" target="_blank" rel="noreferrer" title="https://github.com/genz27/flow_captcha_service">GitHub</a>
           </div>
           <div class="sidebar-head-actions">
-            <a class="portal-link" href="/">公共页面</a>
             <div id="sidebarRoleBadge" class="sidebar-role-pill">未登录</div>
             <button id="sidebarLogoutBtn" class="secondary" type="button">退出登录</button>
           </div>
@@ -1630,7 +2150,7 @@
             <div class="cluster-kpi"><div class="k">平均心跳延迟</div><div id="clusterKpiHeartbeat" class="v">-</div><div class="s">单位：秒</div></div>
           </div>
           <div class="cluster-toolbar">
-            <div class="field"><label>搜索节点</label><input id="clusterSearchInput" placeholder="按节点名、地址、异常原因过滤" /></div>
+            <div class="field"><label>搜索节点</label><input id="clusterSearchInput" placeholder="按节点名、地址、异常原因、错误详情过滤" /></div>
             <div class="field"><label>健康筛选</label><select id="clusterHealthFilter"><option value="all">全部</option><option value="healthy">仅健康</option><option value="abnormal">仅异常</option><option value="timeout">仅超时</option><option value="report_failed">仅上报失败</option><option value="auth_failed">仅认证失败</option><option value="disabled">仅已禁用</option></select></div>
             <div class="field"><label>最近刷新</label><input id="clusterLastUpdated" readonly placeholder="未刷新" /></div>
           </div>
@@ -2359,6 +2879,7 @@
           ["地址", item.base_url || "-"],
           ["健康状态", item.is_healthy ? "健康" : "异常"],
           ["异常原因", item.health_reason || "-"],
+          ["最近错误", item.last_error || "-"],
           ["心跳延迟(s)", item.heartbeat_age_seconds ?? "-"],
           ["browser_count", item.browser_count ?? "-"],
           ["node_max_concurrency", item.node_max_concurrency ?? "-"],
@@ -2456,6 +2977,7 @@
           item.base_url,
           item.health_reason,
           item.health_reason_code,
+          item.last_error,
         ].map((x) => String(x || "").toLowerCase()).join(" ");
         return haystack.includes(keyword);
       };
@@ -2516,7 +3038,8 @@
           const threadIdle = it.thread_idle ?? "-";
           const lastHeartbeatText = esc(it.last_heartbeat_at || "-");
           const lastHeartbeatHtml = lastHeartbeatText === "-" ? "-" : lastHeartbeatText.replace(" ", "<br/>");
-          tr.innerHTML = `<td><span class="node-id mono">#${it.id}</span></td><td><div class="node-name">${esc(it.node_name || "-")}</div></td><td class="mono node-url">${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="metric-chip mono">${it.browser_count ?? "-"}</span></td><td><span class="metric-chip mono">${it.node_max_concurrency ?? "-"}</span></td><td><span class="metric-chip strong mono">${effectiveCapacity}</span></td><td><span class="metric-chip active mono">${threadActive}</span></td><td><span class="metric-chip idle mono">${threadIdle}</span></td><td><span class="status-badge ${ageClass}">${ageText}</span></td><td><span class="status-badge ${reasonClass} reason-badge">${esc(it.health_reason || "-")}</span></td><td><input class="input-mini mono" data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td><div class="time-cell">${lastHeartbeatHtml}</div></td><td><div class="cluster-actions"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
+          const reasonTitle = esc(it.last_error || it.health_reason || "-");
+          tr.innerHTML = `<td><span class="node-id mono">#${it.id}</span></td><td><div class="node-name">${esc(it.node_name || "-")}</div></td><td class="mono node-url">${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="metric-chip mono">${it.browser_count ?? "-"}</span></td><td><span class="metric-chip mono">${it.node_max_concurrency ?? "-"}</span></td><td><span class="metric-chip strong mono">${effectiveCapacity}</span></td><td><span class="metric-chip active mono">${threadActive}</span></td><td><span class="metric-chip idle mono">${threadIdle}</span></td><td><span class="status-badge ${ageClass}">${ageText}</span></td><td><span class="status-badge ${reasonClass} reason-badge" title="${reasonTitle}">${esc(it.health_reason || "-")}</span></td><td><input class="input-mini mono" data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td><div class="time-cell">${lastHeartbeatHtml}</div></td><td><div class="cluster-actions"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
           b.appendChild(tr);
         }
       };

@@ -5,301 +5,358 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>flow_captcha_service 子节点状态页</title>
   <style>
-    :root {
-      --bg: #f3f6f1;
-      --panel: rgba(255, 255, 255, 0.88);
-      --line: rgba(47, 71, 49, 0.14);
-      --text: #152017;
-      --muted: #526355;
-      --accent: #30553a;
-      --accent-soft: #e4efe5;
-      --ok: #e1f6e5;
-      --warn: #fff0cf;
-      --shadow: 0 20px 48px rgba(21, 32, 23, 0.09);
+    :root{
+      --bg:#0b0f12;
+      --panel:rgba(18,23,27,.84);
+      --line:rgba(223,232,227,.1);
+      --text:#e6eee9;
+      --muted:#8f9d95;
+      --accent:#33c26f;
+      --accent-soft:rgba(51,194,111,.1);
+      --warning:#f0b356;
+      --danger:#ff6f7f;
+      --shadow:0 28px 64px rgba(2,7,5,.34);
     }
 
-    * {
-      box-sizing: border-box;
-    }
+    *{box-sizing:border-box}
 
-    body {
-      margin: 0;
-      min-height: 100vh;
-      color: var(--text);
+    body{
+      margin:0;
+      min-height:100vh;
+      color:var(--text);
+      font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
       background:
-        radial-gradient(900px 360px at 0% 0%, rgba(76, 125, 80, 0.18), transparent 58%),
-        radial-gradient(820px 280px at 100% 0%, rgba(161, 133, 64, 0.14), transparent 50%),
-        linear-gradient(180deg, #fbfcf8 0%, #f3f6f1 56%, #edf2ea 100%);
-      font-family: "HarmonyOS Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+        radial-gradient(960px 360px at 0% 0%, rgba(51,194,111,.14), transparent 60%),
+        radial-gradient(820px 280px at 100% 0%, rgba(96,165,250,.08), transparent 50%),
+        linear-gradient(180deg,#0b0f12 0%, #0e1317 54%, #121920 100%);
     }
 
-    .shell {
-      width: min(1160px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 28px 0 40px;
+    a{color:inherit;text-decoration:none}
+
+    .shell{
+      width:min(1180px, calc(100vw - 32px));
+      margin:0 auto;
+      padding:24px 0 36px;
     }
 
-    .hero {
-      position: relative;
-      overflow: hidden;
-      padding: 28px;
-      border: 1px solid rgba(47, 71, 49, 0.12);
-      border-radius: 28px;
+    .hero,
+    .panel{
+      border:1px solid var(--line);
+      border-radius:32px;
+      background:var(--panel);
+      box-shadow:var(--shadow);
+      backdrop-filter:blur(14px);
+    }
+
+    .hero{
+      position:relative;
+      overflow:hidden;
+      padding:34px;
       background:
-        linear-gradient(135deg, rgba(245, 250, 244, 0.98) 0%, rgba(234, 242, 232, 0.95) 54%, rgba(248, 244, 232, 0.92) 100%);
-      box-shadow: var(--shadow);
+        radial-gradient(420px 180px at 0% 0%, rgba(51,194,111,.1), transparent 72%),
+        rgba(18,23,27,.88);
     }
 
-    .hero::after {
-      content: "";
-      position: absolute;
-      right: -88px;
-      top: -80px;
-      width: 260px;
-      height: 260px;
-      border-radius: 999px;
-      background: radial-gradient(circle, rgba(48, 85, 58, 0.16) 0%, rgba(48, 85, 58, 0.02) 66%, transparent 72%);
-      pointer-events: none;
+    .hero::after{
+      content:"";
+      position:absolute;
+      right:-120px;
+      top:-120px;
+      width:320px;
+      height:320px;
+      border-radius:999px;
+      background:radial-gradient(circle, rgba(51,194,111,.14) 0%, rgba(51,194,111,.03) 58%, transparent 72%);
+      pointer-events:none;
     }
 
-    .eyebrow {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      border-radius: 999px;
-      border: 1px solid rgba(48, 85, 58, 0.14);
-      background: rgba(255, 255, 255, 0.58);
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--accent);
+    .eyebrow,
+    .chip{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      width:fit-content;
+      padding:8px 12px;
+      border-radius:999px;
+      border:1px solid rgba(51,194,111,.18);
+      background:rgba(51,194,111,.08);
+      color:#bfeecf;
+      font-size:11px;
+      font-weight:800;
+      letter-spacing:.14em;
+      text-transform:uppercase;
     }
 
-    h1 {
-      margin: 18px 0 10px;
-      font-size: clamp(32px, 5vw, 56px);
-      line-height: 1.02;
-      letter-spacing: -0.03em;
-      max-width: 760px;
+    .hero h1{
+      margin:18px 0 10px;
+      font-size:clamp(36px, 6vw, 64px);
+      line-height:1;
+      letter-spacing:-.05em;
+      color:#f4faf6;
+      max-width:720px;
     }
 
-    .hero p {
-      margin: 0;
-      max-width: 760px;
-      color: var(--muted);
-      font-size: 15px;
-      line-height: 1.8;
+    .hero p{
+      margin:0;
+      max-width:760px;
+      color:var(--muted);
+      font-size:15px;
+      line-height:1.85;
     }
 
-    .hero-meta {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 22px;
+    .hero-meta{
+      display:flex;
+      flex-wrap:wrap;
+      gap:12px;
+      margin-top:22px;
     }
 
-    .chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 14px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.72);
-      font-size: 13px;
-      font-weight: 700;
-      color: #223426;
+    .chip strong{
+      margin-left:8px;
+      color:#f4faf6;
+      font-size:13px;
+      letter-spacing:0;
+      text-transform:none;
     }
 
-    .chip strong {
-      font-weight: 800;
+    .hero-actions{
+      display:flex;
+      flex-wrap:wrap;
+      gap:12px;
+      margin-top:24px;
     }
 
-    .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 24px;
+    .action{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      min-height:46px;
+      padding:0 18px;
+      border-radius:18px;
+      border:1px solid transparent;
+      font-size:14px;
+      font-weight:700;
+      transition:transform .18s ease, background .18s ease, border-color .18s ease;
     }
 
-    .action {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 44px;
-      padding: 0 18px;
-      border-radius: 999px;
-      border: 1px solid rgba(48, 85, 58, 0.12);
-      background: #ffffff;
-      color: var(--text);
-      text-decoration: none;
-      font-size: 13px;
-      font-weight: 700;
-      box-shadow: 0 10px 24px rgba(21, 32, 23, 0.06);
+    .action:hover{
+      transform:translateY(-1px);
     }
 
-    .action.primary {
-      border-color: transparent;
-      background: linear-gradient(135deg, #274b32 0%, #416a49 100%);
-      color: #f8fbf7;
+    .action.primary{
+      background:var(--accent);
+      color:#07110b;
+      box-shadow:0 16px 32px rgba(51,194,111,.22);
     }
 
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(12, minmax(0, 1fr));
-      gap: 16px;
-      margin-top: 16px;
+    .action.secondary{
+      border-color:var(--line);
+      background:rgba(255,255,255,.03);
+      color:var(--text);
     }
 
-    .card {
-      grid-column: span 4;
-      padding: 20px;
-      border: 1px solid rgba(47, 71, 49, 0.1);
-      border-radius: 22px;
-      background: var(--panel);
-      backdrop-filter: blur(12px);
-      box-shadow: 0 16px 34px rgba(21, 32, 23, 0.06);
+    .notice{
+      margin-top:18px;
+      padding:14px 16px;
+      border-radius:18px;
+      border:1px solid transparent;
+      font-size:13px;
+      line-height:1.75;
     }
 
-    .card.wide {
-      grid-column: span 6;
+    .notice.info{
+      background:rgba(96,165,250,.08);
+      border-color:rgba(96,165,250,.16);
+      color:#cadcff;
     }
 
-    .card.full {
-      grid-column: 1 / -1;
+    .notice.success{
+      background:rgba(51,194,111,.08);
+      border-color:rgba(51,194,111,.16);
+      color:#c6f3d6;
     }
 
-    .card h2 {
-      margin: 0 0 10px;
-      font-size: 18px;
-      letter-spacing: -0.02em;
+    .notice.warning{
+      background:rgba(240,179,86,.1);
+      border-color:rgba(240,179,86,.18);
+      color:#f6ddb2;
     }
 
-    .card p,
-    .card li {
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.75;
+    .notice.error{
+      background:rgba(255,111,127,.08);
+      border-color:rgba(255,111,127,.18);
+      color:#ffcbd2;
     }
 
-    .list {
-      margin: 0;
-      padding-left: 18px;
+    .grid{
+      display:grid;
+      grid-template-columns:minmax(0,1.7fr) minmax(320px,1fr);
+      gap:18px;
+      margin-top:18px;
     }
 
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      margin-top: 10px;
+    .panel{
+      padding:24px;
     }
 
-    .stat {
-      padding: 14px;
-      border-radius: 16px;
-      border: 1px solid rgba(47, 71, 49, 0.08);
-      background: rgba(255, 255, 255, 0.72);
+    .panel h2{
+      margin:0;
+      font-size:22px;
+      line-height:1.1;
+      color:#f4faf6;
+      letter-spacing:-.03em;
     }
 
-    .stat .k {
-      color: #68786b;
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
+    .panel-desc{
+      margin:10px 0 0;
+      font-size:13px;
+      line-height:1.75;
+      color:var(--muted);
     }
 
-    .stat .v {
-      margin-top: 8px;
-      font-size: 28px;
-      font-weight: 800;
-      letter-spacing: -0.04em;
+    .stats{
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0,1fr));
+      gap:14px;
+      margin-top:18px;
     }
 
-    .notice {
-      margin-top: 12px;
-      padding: 12px 14px;
-      border-radius: 14px;
-      border: 1px solid transparent;
-      font-size: 13px;
-      line-height: 1.7;
+    .stat{
+      padding:18px;
+      border-radius:22px;
+      border:1px solid var(--line);
+      background:rgba(10,14,16,.62);
     }
 
-    .notice.ok {
-      background: var(--ok);
-      border-color: rgba(37, 99, 61, 0.14);
-      color: #1f5a30;
+    .stat .k{
+      font-size:11px;
+      font-weight:800;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+      color:#8a998f;
     }
 
-    .notice.warn {
-      background: var(--warn);
-      border-color: rgba(161, 133, 64, 0.18);
-      color: #8b5e17;
+    .stat .v{
+      margin-top:10px;
+      font-size:34px;
+      font-weight:800;
+      letter-spacing:-.05em;
+      color:#f4faf6;
     }
 
-    .kv {
-      display: grid;
-      grid-template-columns: 150px 1fr;
-      gap: 10px 14px;
-      margin-top: 8px;
-      font-size: 14px;
-      line-height: 1.7;
+    .detail-list{
+      display:grid;
+      gap:14px;
+      margin:18px 0 0;
     }
 
-    .kv dt {
-      color: #68786b;
-      font-weight: 700;
+    .detail-row{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:14px;
+      padding-bottom:14px;
+      border-bottom:1px solid var(--line);
     }
 
-    .kv dd {
-      margin: 0;
-      color: #203124;
+    .detail-row:last-child{
+      padding-bottom:0;
+      border-bottom:none;
     }
 
-    .mono {
-      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-      word-break: break-all;
+    .detail-row dt{
+      font-size:12px;
+      font-weight:700;
+      letter-spacing:.08em;
+      text-transform:uppercase;
+      color:#8a998f;
     }
 
-    .footer {
-      margin-top: 16px;
-      color: #67786a;
-      font-size: 12px;
-      line-height: 1.7;
+    .detail-row dd{
+      margin:0;
+      text-align:right;
+      font-size:14px;
+      color:#f4faf6;
+      word-break:break-word;
     }
 
-    @media (max-width: 980px) {
-      .card,
-      .card.wide {
-        grid-column: span 6;
+    .info-panel{
+      margin-top:18px;
+    }
+
+    .info-columns{
+      display:grid;
+      grid-template-columns:repeat(2, minmax(0,1fr));
+      gap:18px;
+      margin-top:18px;
+    }
+
+    .info-card{
+      padding:20px;
+      border-radius:24px;
+      border:1px solid var(--line);
+      background:rgba(10,14,16,.56);
+    }
+
+    .info-card h3{
+      margin:0;
+      font-size:18px;
+      color:#f4faf6;
+    }
+
+    .info-card ul{
+      margin:14px 0 0;
+      padding-left:18px;
+    }
+
+    .info-card li,
+    .info-card p{
+      color:var(--muted);
+      font-size:14px;
+      line-height:1.8;
+    }
+
+    .muted-inline{
+      color:var(--muted);
+      font-size:12px;
+      line-height:1.7;
+    }
+
+    .mono{
+      font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+    }
+
+    @media (max-width: 900px){
+      .grid{
+        grid-template-columns:1fr;
+      }
+
+      .info-columns{
+        grid-template-columns:1fr;
       }
     }
 
-    @media (max-width: 720px) {
-      .shell {
-        width: min(100vw - 20px, 100%);
-        padding-top: 16px;
+    @media (max-width: 720px){
+      .shell{
+        width:min(100vw - 20px, 100%);
+        padding:16px 0 28px;
       }
 
-      .hero {
-        padding: 22px 18px;
-        border-radius: 24px;
+      .hero,
+      .panel{
+        padding:20px;
+        border-radius:24px;
       }
 
-      .card,
-      .card.wide {
-        grid-column: 1 / -1;
+      .stats{
+        grid-template-columns:1fr;
       }
 
-      .stats {
-        grid-template-columns: 1fr;
+      .detail-row{
+        flex-direction:column;
       }
 
-      .kv {
-        grid-template-columns: 1fr;
-        gap: 4px;
+      .detail-row dd{
+        text-align:left;
       }
     }
   </style>
@@ -308,53 +365,31 @@
   <main class="shell">
     <section class="hero">
       <span class="eyebrow">Subnode Status</span>
-      <h1>这是子节点状态页，不提供用户注册和登录。</h1>
+      <h1>子节点状态页</h1>
       <p>
         当前实例用于执行本地有头浏览器打码，并向主节点上报心跳与容量。
         如果你要给用户提供门户、充值、API Key 管理，请访问主节点或单机实例的主页。
       </p>
+
       <div class="hero-meta">
-        <span class="chip">节点 <strong id="heroNodeName">--</strong></span>
-        <span class="chip">角色 <strong id="heroRole">subnode</strong></span>
-        <span class="chip">状态 <strong id="heroStatus">检查中</strong></span>
+        <span class="chip">节点<strong id="heroNodeName">--</strong></span>
+        <span class="chip">角色<strong id="heroRole">subnode</strong></span>
+        <span class="chip">状态<strong id="heroStatus">检查中</strong></span>
       </div>
-      <div class="actions">
+
+      <div class="hero-actions">
         <a class="action primary" href="/admin">进入管理后台</a>
-        <a class="action" href="/api/v1/health" target="_blank" rel="noreferrer">打开健康检查</a>
-        <a class="action" href="/api/portal/summary" target="_blank" rel="noreferrer">查看公开概览</a>
+        <a class="action secondary" href="/api/v1/health" target="_blank" rel="noreferrer">打开健康检查</a>
+        <a class="action secondary" href="/api/portal/summary" target="_blank" rel="noreferrer">查看公开概览</a>
       </div>
     </section>
 
+    <div id="statusNotice" class="notice info">正在读取节点摘要。</div>
+
     <section class="grid">
-      <article class="card">
-        <h2>节点职责</h2>
-        <ul class="list">
-          <li>执行本地 Playwright + Chromium 打码。</li>
-          <li>向 master 注册并持续上报心跳。</li>
-          <li>接收 routed session 的 `finish` / `error` 回调。</li>
-        </ul>
-      </article>
-
-      <article class="card">
-        <h2>不包含的功能</h2>
-        <ul class="list">
-          <li>不对外开放用户自注册和登录首页。</li>
-          <li>不负责用户额度、CDK、Portal API Key 自助管理。</li>
-          <li>不负责集群调度决策，调度由 master 执行。</li>
-        </ul>
-      </article>
-
-      <article class="card">
-        <h2>排查入口</h2>
-        <ul class="list">
-          <li><span class="mono">/api/v1/health</span> 查看存活状态。</li>
-          <li><span class="mono">/admin</span> 查看配置、日志和节点执行信息。</li>
-          <li><span class="mono">/api/portal/summary</span> 查看公共运行摘要。</li>
-        </ul>
-      </article>
-
-      <article class="card wide">
+      <article class="panel">
         <h2>运行状态</h2>
+        <p class="panel-desc">页面每 30 秒自动刷新一次，用于快速确认子节点是否仍在正常上报和执行本地打码。</p>
         <div class="stats">
           <div class="stat">
             <div class="k">配置浏览器槽位</div>
@@ -369,42 +404,48 @@
             <div id="statIdle" class="v">--</div>
           </div>
           <div class="stat">
-            <div class="k">待 finish/error 会话</div>
+            <div class="k">待 FINISH / ERROR 会话</div>
             <div id="statPending" class="v">--</div>
           </div>
         </div>
-        <div id="statusNotice" class="notice ok">正在读取节点摘要。</div>
       </article>
 
-      <article class="card wide">
+      <article class="panel">
         <h2>节点信息</h2>
-        <dl class="kv">
-          <dt>节点名称</dt>
-          <dd id="detailNodeName">--</dd>
-          <dt>运行角色</dt>
-          <dd id="detailRole">subnode</dd>
-          <dt>本地执行</dt>
-          <dd id="detailLocalSolve">--</dd>
-          <dt>活动会话</dt>
-          <dd id="detailActiveSessions">--</dd>
-          <dt>累计 solve</dt>
-          <dd id="detailSolveTotal">--</dd>
-          <dt>累计错误</dt>
-          <dd id="detailErrorTotal">--</dd>
+        <p class="panel-desc">这里只展示子节点本地执行状态，不提供终端用户登录或注册入口。</p>
+        <dl class="detail-list">
+          <div class="detail-row"><dt>节点名称</dt><dd id="detailNodeName">--</dd></div>
+          <div class="detail-row"><dt>运行角色</dt><dd id="detailRole">subnode</dd></div>
+          <div class="detail-row"><dt>本地执行</dt><dd id="detailLocalSolve">--</dd></div>
+          <div class="detail-row"><dt>活动会话</dt><dd id="detailActiveSessions">--</dd></div>
+          <div class="detail-row"><dt>累计 solve</dt><dd id="detailSolveTotal">--</dd></div>
+          <div class="detail-row"><dt>累计错误</dt><dd id="detailErrorTotal">--</dd></div>
         </dl>
       </article>
+    </section>
 
-      <article class="card full">
-        <h2>接入说明</h2>
-        <p>
-          对外用户入口应该放在 `master` 或 `standalone` 实例。子节点主页只保留运行状态展示，
-          目的是让部署人员确认这个节点是否已启动、是否处于 `subnode` 角色，以及浏览器槽位是否正常工作。
-        </p>
-        <p class="footer">
-          如果这里显示的角色不是 <span class="mono">subnode</span>，说明当前实例配置可能与预期不一致，
-          请检查 <span class="mono">FCS_CLUSTER_ROLE</span> 或 <span class="mono">data/setting.toml</span>。
-        </p>
-      </article>
+    <section class="panel info-panel">
+      <h2>接入说明</h2>
+      <p class="panel-desc">子节点主页只保留运行状态展示，用于让部署人员确认当前实例角色、浏览器容量和健康状态是否正常。</p>
+      <div class="info-columns">
+        <div class="info-card">
+          <h3>节点职责</h3>
+          <ul>
+            <li>执行本地 Playwright + Chromium 打码。</li>
+            <li>向主节点注册并持续上报心跳。</li>
+            <li>接收 routed session 的 <span class="mono">finish</span> / <span class="mono">error</span> 回调。</li>
+          </ul>
+        </div>
+        <div class="info-card">
+          <h3>排查入口</h3>
+          <ul>
+            <li><span class="mono">/api/v1/health</span> 查看实例存活状态。</li>
+            <li><span class="mono">/admin</span> 查看配置、日志和节点执行信息。</li>
+            <li><span class="mono">/api/portal/summary</span> 查看公开运行摘要。</li>
+          </ul>
+          <p class="muted-inline">如果这里显示的角色不是 <span class="mono">subnode</span>，请检查 <span class="mono">FCS_CLUSTER_ROLE</span> 或 <span class="mono">data/setting.toml</span>。</p>
+        </div>
+      </div>
     </section>
   </main>
 
@@ -442,7 +483,7 @@
       return payload;
     }
 
-    async function bootstrap() {
+    async function refreshStatus() {
       try {
         const [summary, health] = await Promise.all([
           requestJson("/api/portal/summary"),
@@ -453,10 +494,11 @@
         const browser = runtime.browser || {};
         const role = summary.service?.role || health.role || "unknown";
         const nodeName = summary.service?.node_name || health.node_name || "--";
+        const status = String(health.status || "ok");
 
         setText("heroNodeName", nodeName);
         setText("heroRole", role);
-        setText("heroStatus", health.status || "ok");
+        setText("heroStatus", status === "ok" ? "OK" : status.toUpperCase());
 
         setText("statConfigured", toText(browser.configured_browser_count));
         setText("statBusy", toText(browser.busy_browser_count));
@@ -471,17 +513,25 @@
         setText("detailErrorTotal", toText(browser.total_error_count));
 
         if (role !== "subnode") {
-          setNotice("当前实例并不是 subnode 角色，这个页面更适合作为子节点运行页使用。", "warn");
+          setNotice("当前实例并不是 subnode 角色，这个页面更适合作为子节点运行页使用。", "warning");
+          return;
+        }
+
+        if (status === "ok") {
+          setNotice("子节点运行正常。这里不提供用户注册或登录，只展示节点状态与入口。", "success");
         } else {
-          setNotice("子节点运行正常。这里不提供用户注册或登录，只展示节点状态与入口。", "ok");
+          setNotice(`子节点状态异常：${status}`, "warning");
         }
       } catch (error) {
         setText("heroStatus", "读取失败");
-        setNotice(`节点摘要读取失败：${error.message || error}`, "warn");
+        setNotice(`节点摘要读取失败：${error.message || error}`, "error");
       }
     }
 
-    window.addEventListener("DOMContentLoaded", bootstrap);
+    window.addEventListener("DOMContentLoaded", () => {
+      refreshStatus();
+      window.setInterval(refreshStatus, 30000);
+    });
   </script>
 </body>
 </html>
