@@ -48,12 +48,16 @@ class CaptchaRuntime:
         api_key_id: int,
     ) -> Dict[str, Any]:
         service = await self._get_browser_service()
-        token, browser_id = await service.get_token(project_id, action, token_id=token_id)
+        token_result = await service.get_token(project_id, action, token_id=token_id)
+        token = token_result.token if token_result else None
+        browser_id = token_result.browser_ref if token_result else None
 
         if not token or browser_id is None:
             raise RuntimeError("有头打码失败，未获取到 token")
 
-        fingerprint = await service.get_fingerprint(browser_id)
+        fingerprint = token_result.fingerprint if token_result else None
+        if fingerprint is None:
+            fingerprint = await service.get_fingerprint(browser_id)
         session_id = str(uuid.uuid4())
         await self.registry.create(
             session_id=session_id,

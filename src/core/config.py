@@ -164,6 +164,10 @@ class Config:
                 "browser_launch_background": True,
                 "browser_score_dom_wait_seconds": 25,
                 "browser_recaptcha_settle_seconds": 3,
+                "browser_standby_token_pool_enabled": True,
+                "browser_standby_token_ttl_seconds": 45,
+                "browser_standby_token_pool_depth": 2,
+                "browser_standby_refill_idle_seconds": 0.8,
                 "browser_score_test_warmup_seconds": 12,
                 "browser_idle_ttl_seconds": 600,
                 "flow_timeout": 300,
@@ -385,6 +389,52 @@ class Config:
         if value:
             return float(value)
         return float(self._get("captcha", "browser_recaptcha_settle_seconds", 3))
+
+    @property
+    def browser_standby_token_pool_enabled(self) -> bool:
+        value = os.getenv("FCS_BROWSER_STANDBY_TOKEN_POOL_ENABLED")
+        if value:
+            return _as_bool(value, True)
+        return _as_bool(self._get("captcha", "browser_standby_token_pool_enabled", True), True)
+
+    @property
+    def browser_standby_token_ttl_seconds(self) -> float:
+        value = os.getenv("FCS_BROWSER_STANDBY_TOKEN_TTL_SECONDS")
+        if value:
+            try:
+                return max(5.0, float(value))
+            except Exception:
+                return 45.0
+        try:
+            return max(5.0, float(self._get("captcha", "browser_standby_token_ttl_seconds", 45)))
+        except Exception:
+            return 45.0
+
+    @property
+    def browser_standby_token_pool_depth(self) -> int:
+        value = os.getenv("FCS_BROWSER_STANDBY_TOKEN_POOL_DEPTH")
+        if value:
+            try:
+                return max(0, min(2, int(value)))
+            except Exception:
+                return 2
+        try:
+            return max(0, min(2, int(self._get("captcha", "browser_standby_token_pool_depth", 2))))
+        except Exception:
+            return 2
+
+    @property
+    def browser_standby_refill_idle_seconds(self) -> float:
+        value = os.getenv("FCS_BROWSER_STANDBY_REFILL_IDLE_SECONDS")
+        if value:
+            try:
+                return max(0.0, float(value))
+            except Exception:
+                return 0.8
+        try:
+            return max(0.0, float(self._get("captcha", "browser_standby_refill_idle_seconds", 0.8)))
+        except Exception:
+            return 0.8
 
     @property
     def browser_score_test_warmup_seconds(self) -> float:
