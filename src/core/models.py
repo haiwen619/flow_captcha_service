@@ -59,6 +59,15 @@ class CustomScoreRequest(BaseModel):
     enterprise: bool = False
 
 
+class CustomTokenRequest(BaseModel):
+    website_url: str = Field(min_length=1)
+    website_key: str = Field(min_length=1)
+    action: str = "homepage"
+    enterprise: bool = False
+    captcha_type: str = "recaptcha_v3"
+    is_invisible: bool = True
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str

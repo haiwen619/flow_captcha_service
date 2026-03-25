@@ -440,6 +440,8 @@ class TokenBrowser:
         self._shared_keepalive_page = None
         self._shared_ready_page = None
         self._shared_ready_key: Optional[str] = None
+        self._shared_custom_pages: Dict[str, Any] = {}
+        self._shared_custom_page_last_used: Dict[str, float] = {}
         # 这里记录的是 Playwright driver 的 PID；Chromium 进程树通过 slot marker 扫描。
         self._shared_driver_pid: Optional[int] = None
         self._shared_driver_proc = None
@@ -838,6 +840,274 @@ class TokenBrowser:
         self._shared_ready_key = None
         await self._close_page_quietly(ready_page)
 
+    async def _drop_shared_custom_page(self, custom_key: str):
+        custom_page = self._shared_custom_pages.pop(custom_key, None)
+        self._shared_custom_page_last_used.pop(custom_key, None)
+        await self._close_page_quietly(custom_page)
+
+    async def _drop_all_shared_custom_pages(self):
+        custom_pages = list(self._shared_custom_pages.values())
+        self._shared_custom_pages = {}
+        self._shared_custom_page_last_used = {}
+        for custom_page in custom_pages:
+            await self._close_page_quietly(custom_page)
+
+    def _build_custom_page_key(
+        self,
+        website_url: str,
+        website_key: str,
+        captcha_type: str,
+        enterprise: bool,
+    ) -> str:
+        primary_host = "https://www.recaptcha.net" if self._browser_proxy_active else "https://www.google.com"
+        normalized_type = str(captcha_type or "").strip().lower() or "recaptcha_v3"
+        return "|".join(
+            [
+                normalized_type,
+                "1" if enterprise else "0",
+                str(website_key or "").strip(),
+                str(website_url or "").strip(),
+                primary_host,
+            ]
+        )
+
+    def _build_custom_page_runtime(
+        self,
+        *,
+        website_key: str,
+        captcha_type: str,
+        enterprise: bool,
+    ) -> Dict[str, Any]:
+        primary_host = "https://www.recaptcha.net" if self._browser_proxy_active else "https://www.google.com"
+        secondary_host = "https://www.google.com" if primary_host == "https://www.recaptcha.net" else "https://www.recaptcha.net"
+        normalized_type = str(captcha_type or "").strip().lower() or "recaptcha_v3"
+        is_turnstile = "turnstile" in normalized_type
+        is_recaptcha_v2 = "recaptcha_v2" in normalized_type or normalized_type.endswith("v2")
+        script_path = "recaptcha/enterprise.js" if enterprise else "recaptcha/api.js"
+        execute_target = "grecaptcha.enterprise.execute" if enterprise else "grecaptcha.execute"
+        ready_target = "grecaptcha.enterprise.ready" if enterprise else "grecaptcha.ready"
+        if is_turnstile:
+            wait_expression = "typeof turnstile !== 'undefined' && typeof turnstile.render === 'function'"
+            api_label = "turnstile.js"
+        elif is_recaptcha_v2:
+            wait_expression = (
+                "typeof grecaptcha !== 'undefined' && typeof grecaptcha.enterprise !== 'undefined' && "
+                "typeof grecaptcha.enterprise.render === 'function'"
+            ) if enterprise else (
+                "typeof grecaptcha !== 'undefined' && typeof grecaptcha.render === 'function'"
+            )
+            api_label = "enterprise.js" if enterprise else "api.js"
+        else:
+            wait_expression = (
+                "typeof grecaptcha !== 'undefined' && typeof grecaptcha.enterprise !== 'undefined' && "
+                "typeof grecaptcha.enterprise.execute === 'function'"
+            ) if enterprise else (
+                "typeof grecaptcha !== 'undefined' && typeof grecaptcha.execute === 'function'"
+            )
+            api_label = "enterprise.js" if enterprise else "api.js"
+        render_value = "explicit" if is_recaptcha_v2 else str(website_key or "").strip()
+        return {
+            "primary_host": primary_host,
+            "secondary_host": secondary_host,
+            "normalized_type": normalized_type,
+            "is_turnstile": is_turnstile,
+            "is_recaptcha_v2": is_recaptcha_v2,
+            "script_path": script_path,
+            "execute_target": execute_target,
+            "ready_target": ready_target,
+            "wait_expression": wait_expression,
+            "api_label": api_label,
+            "render_value": render_value,
+        }
+
+    async def _inject_custom_page_scripts(self, page, runtime: Dict[str, Any]):
+        if runtime["is_turnstile"]:
+            await page.evaluate(
+                """
+                    (scriptUrl) => {
+                        const existing = Array.from(document.scripts || []).some((script) => {
+                            const src = script?.src || "";
+                            return src.includes('turnstile/v0/api.js');
+                        });
+                        if (existing) return;
+                        const script = document.createElement('script');
+                        script.src = scriptUrl;
+                        script.async = true;
+                        script.defer = true;
+                        document.head.appendChild(script);
+                    }
+                """,
+                "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit",
+            )
+            return
+
+        await page.evaluate(
+            """
+                (primaryUrl, secondaryUrl) => {
+                    const existing = Array.from(document.scripts || []).some((script) => {
+                        const src = script?.src || "";
+                        return src.includes('/recaptcha/');
+                    });
+                    if (existing) return;
+                    const urls = [primaryUrl, secondaryUrl];
+                    const loadScript = (index) => {
+                        if (index >= urls.length) return;
+                        const script = document.createElement('script');
+                        script.src = urls[index];
+                        script.async = true;
+                        script.onerror = () => loadScript(index + 1);
+                        document.head.appendChild(script);
+                    };
+                    loadScript(0);
+                }
+            """,
+            f"{runtime['primary_host']}/{runtime['script_path']}?render={runtime['render_value']}",
+            f"{runtime['secondary_host']}/{runtime['script_path']}?render={runtime['render_value']}",
+        )
+
+    async def _prepare_custom_page(
+        self,
+        page,
+        *,
+        website_url: str,
+        runtime: Dict[str, Any],
+        warmup: bool,
+    ) -> Dict[str, Any]:
+        page_loaded = False
+        stage_started = time.perf_counter()
+
+        try:
+            goto_started = time.perf_counter()
+            await page.goto(website_url, wait_until="domcontentloaded", timeout=30000)
+            goto_ms = int((time.perf_counter() - goto_started) * 1000)
+        except Exception as e:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] Token-{self.token_id} 自定义 page.goto 失败: {type(e).__name__}: {str(e)[:200]}"
+            )
+            raise
+
+        for _ in range(20):
+            try:
+                ready_state = await page.evaluate("document.readyState")
+                if ready_state == "complete":
+                    page_loaded = True
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        if not page_loaded:
+            debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 自定义页面 readyState 未达到 complete，继续尝试预热")
+
+        try:
+            await page.mouse.move(320, 220)
+            await page.mouse.move(520, 320, steps=12)
+            await page.mouse.wheel(0, 240)
+            await page.bring_to_front()
+            await page.evaluate("""
+                (() => {
+                    try {
+                        window.focus();
+                        window.dispatchEvent(new Event('focus'));
+                        document.dispatchEvent(new MouseEvent('mousemove', {
+                            bubbles: true,
+                            clientX: Math.max(32, Math.floor((window.innerWidth || 1280) * 0.4)),
+                            clientY: Math.max(32, Math.floor((window.innerHeight || 720) * 0.35))
+                        }));
+                        window.scrollTo(0, Math.min(280, document.body?.scrollHeight || 280));
+                    } catch (e) {}
+                })()
+            """)
+        except Exception:
+            pass
+
+        if warmup:
+            warmup_seconds = float(getattr(config, "browser_score_test_warmup_seconds", 12) or 12)
+            if warmup_seconds > 0:
+                debug_logger.log_info(
+                    f"[BrowserCaptcha] Token-{self.token_id} 真实页面预热 {warmup_seconds:.1f}s 后再执行自定义打码"
+                )
+                await asyncio.sleep(warmup_seconds)
+
+        try:
+            ready_started = time.perf_counter()
+            await page.wait_for_function(runtime["wait_expression"], timeout=15000)
+            ready_ms = int((time.perf_counter() - ready_started) * 1000)
+        except Exception as e:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] Token-{self.token_id} 自定义 grecaptcha 未就绪，尝试补注入脚本: {type(e).__name__}: {str(e)[:200]}"
+            )
+            try:
+                await self._inject_custom_page_scripts(page, runtime)
+                ready_started = time.perf_counter()
+                await page.wait_for_function(runtime["wait_expression"], timeout=15000)
+                ready_ms = int((time.perf_counter() - ready_started) * 1000)
+            except Exception as inject_error:
+                debug_logger.log_warning(
+                    f"[BrowserCaptcha] Token-{self.token_id} 自定义 grecaptcha 最终未就绪: {type(inject_error).__name__}: {str(inject_error)[:200]}"
+                )
+                raise
+
+        return {
+            "goto_ms": goto_ms,
+            "grecaptcha_ready_ms": ready_ms,
+            "ready_page_prepare_ms": int((time.perf_counter() - stage_started) * 1000),
+        }
+
+    async def _trim_shared_custom_pages(self, *, keep_key: Optional[str] = None, max_pages: int = 3):
+        while len(self._shared_custom_pages) > max_pages:
+            evictable = [
+                (page_key, self._shared_custom_page_last_used.get(page_key, 0.0))
+                for page_key in self._shared_custom_pages
+                if page_key != keep_key
+            ]
+            if not evictable:
+                return
+            evict_key = min(evictable, key=lambda item: item[1])[0]
+            await self._drop_shared_custom_page(evict_key)
+
+    async def _get_or_create_custom_page(
+        self,
+        context,
+        *,
+        website_url: str,
+        website_key: str,
+        captcha_type: str,
+        enterprise: bool,
+    ):
+        custom_key = self._build_custom_page_key(website_url, website_key, captcha_type, enterprise)
+        runtime = self._build_custom_page_runtime(
+            website_key=website_key,
+            captcha_type=captcha_type,
+            enterprise=enterprise,
+        )
+        custom_page = self._shared_custom_pages.get(custom_key)
+        ready_hit = False
+
+        try:
+            if custom_page and not custom_page.is_closed():
+                ready_ok = await custom_page.evaluate(runtime["wait_expression"])
+                if ready_ok:
+                    ready_hit = True
+                    self._shared_custom_page_last_used[custom_key] = time.monotonic()
+                    return custom_page, custom_key, runtime, ready_hit
+        except Exception:
+            pass
+
+        await self._drop_shared_custom_page(custom_key)
+        custom_page = await context.new_page()
+        await custom_page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        custom_page.on("requestfailed", lambda request: None)
+        await self._prepare_custom_page(
+            custom_page,
+            website_url=website_url,
+            runtime=runtime,
+            warmup=True,
+        )
+        self._shared_custom_pages[custom_key] = custom_page
+        self._shared_custom_page_last_used[custom_key] = time.monotonic()
+        await self._trim_shared_custom_pages(keep_key=custom_key)
+        return custom_page, custom_key, runtime, ready_hit
+
     async def _create_ready_page(self, context, project_id: str, website_key: str):
         stage_started = time.perf_counter()
         page = await context.new_page()
@@ -1073,9 +1343,10 @@ class TokenBrowser:
         context = self._shared_context
         keepalive_page = self._shared_keepalive_page
         ready_page = self._shared_ready_page
+        custom_pages = list(self._shared_custom_pages.values())
         driver_proc = self._shared_driver_proc
         driver_pid = self._shared_driver_pid or self._read_pid_file()
-        had_browser = bool(playwright or browser or context or keepalive_page or ready_page or driver_proc or driver_pid)
+        had_browser = bool(playwright or browser or context or keepalive_page or ready_page or custom_pages or driver_proc or driver_pid)
 
         self._shared_playwright = None
         self._shared_browser = None
@@ -1083,6 +1354,8 @@ class TokenBrowser:
         self._shared_keepalive_page = None
         self._shared_ready_page = None
         self._shared_ready_key = None
+        self._shared_custom_pages = {}
+        self._shared_custom_page_last_used = {}
         self._shared_driver_pid = None
         self._shared_driver_proc = None
         self._shared_proxy_url = None
@@ -1358,6 +1631,8 @@ class TokenBrowser:
             self._shared_keepalive_page = None
             self._shared_ready_page = None
             self._shared_ready_key = None
+            self._shared_custom_pages = {}
+            self._shared_custom_page_last_used = {}
             self._shared_driver_pid = None
             self._shared_driver_proc = None
             self._shared_proxy_url = None
@@ -1648,159 +1923,255 @@ class TokenBrowser:
         action: str,
         verify_url: Optional[str] = None,
         enterprise: bool = False,
+        captcha_type: str = "recaptcha_v3",
+        is_invisible: bool = True,
+        reuse_ready_page: bool = False,
     ) -> Any:
         """在任意站点执行 reCAPTCHA，用于分数测试等非 Flow 场景。"""
         page = None
+        custom_key: Optional[str] = None
+        runtime = self._build_custom_page_runtime(
+            website_key=website_key,
+            captcha_type=captcha_type,
+            enterprise=enterprise,
+        )
         try:
-            page = await context.new_page()
-            await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
-
-            primary_host = "https://www.recaptcha.net" if self._browser_proxy_active else "https://www.google.com"
-            secondary_host = "https://www.google.com" if primary_host == "https://www.recaptcha.net" else "https://www.recaptcha.net"
-            script_path = "recaptcha/enterprise.js" if enterprise else "recaptcha/api.js"
-            execute_target = "grecaptcha.enterprise.execute" if enterprise else "grecaptcha.execute"
-            ready_target = "grecaptcha.enterprise.ready" if enterprise else "grecaptcha.ready"
-            wait_expression = (
-                "typeof grecaptcha !== 'undefined' && typeof grecaptcha.enterprise !== 'undefined' && "
-                "typeof grecaptcha.enterprise.execute === 'function'"
-            ) if enterprise else (
-                "typeof grecaptcha !== 'undefined' && typeof grecaptcha.execute === 'function'"
-            )
-            api_label = "enterprise.js" if enterprise else "api.js"
-
-            debug_logger.log_info(
-                f"[BrowserCaptcha] Token-{self.token_id} 加载真实自定义页面 {api_label}: primary={primary_host}, secondary={secondary_host}, url={website_url}"
-            )
-
-            def handle_request_failed(request):
-                try:
-                    failed_url = request.url or ""
-                    if not any(d in failed_url for d in ["google.com", "gstatic.com", "recaptcha.net", "antcpt.com"]):
-                        return
-                    failure = request.failure or ""
-                    debug_logger.log_warning(
-                        f"[BrowserCaptcha] Token-{self.token_id} 自定义资源加载失败: url={failed_url[:200]}, error={failure}"
-                    )
-                except Exception:
-                    pass
-
-            page.on("requestfailed", handle_request_failed)
-
-            try:
-                await page.goto(website_url, wait_until="domcontentloaded", timeout=30000)
-            except Exception as e:
-                debug_logger.log_warning(
-                    f"[BrowserCaptcha] Token-{self.token_id} 自定义 page.goto 失败: {type(e).__name__}: {str(e)[:200]}"
+            if reuse_ready_page:
+                page, custom_key, runtime, ready_hit = await self._get_or_create_custom_page(
+                    context,
+                    website_url=website_url,
+                    website_key=website_key,
+                    captcha_type=captcha_type,
+                    enterprise=enterprise,
                 )
-                return None
-
-            page_loaded = False
-            for _ in range(20):
-                try:
-                    ready_state = await page.evaluate("document.readyState")
-                    if ready_state == "complete":
-                        page_loaded = True
-                        break
-                except Exception:
-                    pass
-                await asyncio.sleep(0.5)
-            if not page_loaded:
-                debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 自定义页面 readyState 未达到 complete，继续尝试预热")
-
-            # 模拟更自然的前台交互，避免冷启动空白上下文直接 execute。
-            try:
-                await page.mouse.move(320, 220)
-                await page.mouse.move(520, 320, steps=12)
-                await page.mouse.wheel(0, 240)
-                await page.bring_to_front()
-                await page.evaluate("""
-                    (() => {
-                        try {
-                            window.focus();
-                            window.dispatchEvent(new Event('focus'));
-                            document.dispatchEvent(new MouseEvent('mousemove', {
-                                bubbles: true,
-                                clientX: Math.max(32, Math.floor((window.innerWidth || 1280) * 0.4)),
-                                clientY: Math.max(32, Math.floor((window.innerHeight || 720) * 0.35))
-                            }));
-                            window.scrollTo(0, Math.min(280, document.body?.scrollHeight || 280));
-                        } catch (e) {}
-                    })()
-                """)
-            except Exception:
-                pass
-
-            warmup_seconds = float(getattr(config, "browser_score_test_warmup_seconds", 12) or 12)
-            if warmup_seconds > 0:
                 debug_logger.log_info(
-                    f"[BrowserCaptcha] Token-{self.token_id} 真实页面预热 {warmup_seconds:.1f}s 后再执行自定义打码"
+                    f"[BrowserCaptcha] Token-{self.token_id} 复用自定义热页面={ready_hit} "
+                    f"type={runtime['normalized_type']} url={website_url}"
                 )
-                await asyncio.sleep(warmup_seconds)
-
-            try:
-                await page.wait_for_function(wait_expression, timeout=15000)
-            except Exception as e:
-                debug_logger.log_warning(
-                    f"[BrowserCaptcha] Token-{self.token_id} 自定义 grecaptcha 未就绪，尝试补注入脚本: {type(e).__name__}: {str(e)[:200]}"
+            else:
+                page = await context.new_page()
+                await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+                debug_logger.log_info(
+                    f"[BrowserCaptcha] Token-{self.token_id} 加载真实自定义页面 {runtime['api_label']}: "
+                    f"type={runtime['normalized_type']}, primary={runtime['primary_host']}, "
+                    f"secondary={runtime['secondary_host']}, url={website_url}"
                 )
-                try:
-                    await page.evaluate(f"""
-                        (primaryUrl, secondaryUrl) => {{
-                            const existing = Array.from(document.scripts || []).some((script) => {{
-                                const src = script?.src || "";
-                                return src.includes('/recaptcha/');
-                            }});
-                            if (existing) return;
-                            const urls = [primaryUrl, secondaryUrl];
-                            const loadScript = (index) => {{
-                                if (index >= urls.length) return;
-                                const script = document.createElement('script');
-                                script.src = urls[index];
-                                script.async = true;
-                                script.onerror = () => loadScript(index + 1);
-                                document.head.appendChild(script);
-                            }};
-                            loadScript(0);
-                        }}
-                    """, f"{primary_host}/{script_path}?render={website_key}", f"{secondary_host}/{script_path}?render={website_key}")
-                    await page.wait_for_function(wait_expression, timeout=15000)
-                except Exception as inject_error:
-                    debug_logger.log_warning(
-                        f"[BrowserCaptcha] Token-{self.token_id} 自定义 grecaptcha 最终未就绪: {type(inject_error).__name__}: {str(inject_error)[:200]}"
-                    )
-                    return None
+                await self._prepare_custom_page(
+                    page,
+                    website_url=website_url,
+                    runtime=runtime,
+                    warmup=True,
+                )
 
             await self._capture_page_fingerprint(page)
 
-            token = await asyncio.wait_for(
-                page.evaluate(
-                    f"""
-                        (actionName) => {{
-                            return new Promise((resolve, reject) => {{
-                                const timeout = setTimeout(() => reject(new Error('timeout')), 25000);
-                                try {{
-                                    {ready_target}(function() {{
-                                        {execute_target}('{website_key}', {{action: actionName}})
-                                            .then(t => {{
-                                                clearTimeout(timeout);
-                                                resolve(t);
-                                            }})
-                                            .catch(e => {{
-                                                clearTimeout(timeout);
-                                                reject(e);
-                                            }});
-                                    }});
-                                }} catch (e) {{
-                                    clearTimeout(timeout);
-                                    reject(e);
-                                }}
-                            }});
-                        }}
-                    """,
-                    action,
-                ),
-                timeout=30,
-            )
+            if runtime["is_turnstile"]:
+                token = await asyncio.wait_for(
+                    page.evaluate(
+                        """
+                            ({ siteKey, actionName }) => {
+                                return new Promise((resolve, reject) => {
+                                    const api = window.turnstile;
+                                    if (!api || typeof api.render !== 'function') {
+                                        reject(new Error('turnstile_unavailable'));
+                                        return;
+                                    }
+
+                                    let settled = false;
+                                    const timeout = setTimeout(() => {
+                                        if (settled) return;
+                                        settled = true;
+                                        reject(new Error('timeout'));
+                                    }, 30000);
+
+                                    const done = (token) => {
+                                        if (settled || !token) return;
+                                        settled = true;
+                                        clearTimeout(timeout);
+                                        resolve(token);
+                                    };
+
+                                    const fail = (reason) => {
+                                        if (settled) return;
+                                        settled = true;
+                                        clearTimeout(timeout);
+                                        reject(new Error(String(reason || 'turnstile_failed')));
+                                    };
+
+                                    try {
+                                        const host = document.createElement('div');
+                                        host.id = `fcs-turnstile-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+                                        host.style.position = 'fixed';
+                                        host.style.left = '-9999px';
+                                        host.style.top = '0';
+                                        host.style.width = '320px';
+                                        host.style.height = '65px';
+                                        document.body.appendChild(host);
+
+                                        const widgetId = api.render(host, {
+                                            sitekey: siteKey,
+                                            action: actionName || undefined,
+                                            execution: 'execute',
+                                            appearance: 'execute',
+                                            callback: done,
+                                            'error-callback': fail,
+                                            'expired-callback': () => fail('expired'),
+                                            'timeout-callback': () => fail('timeout'),
+                                        });
+
+                                        if (typeof api.execute === 'function') {
+                                            try { api.execute(widgetId); } catch (e) {}
+                                            try { api.execute(host); } catch (e) {}
+                                        }
+
+                                        const probe = () => {
+                                            if (settled) return;
+                                            const input = document.querySelector('input[name="cf-turnstile-response"]');
+                                            const currentToken = input && input.value ? String(input.value).trim() : '';
+                                            if (currentToken) {
+                                                done(currentToken);
+                                                return;
+                                            }
+                                            setTimeout(probe, 500);
+                                        };
+                                        setTimeout(probe, 600);
+                                    } catch (e) {
+                                        fail(e && e.message ? e.message : String(e));
+                                    }
+                                });
+                            }
+                        """,
+                        {"siteKey": website_key, "actionName": action},
+                    ),
+                    timeout=45,
+                )
+            elif runtime["is_recaptcha_v2"]:
+                token = await asyncio.wait_for(
+                    page.evaluate(
+                        """
+                            ({ siteKey, actionName, enterpriseMode, invisibleMode }) => {
+                                return new Promise((resolve, reject) => {
+                                    const apiRoot = enterpriseMode
+                                        ? (window.grecaptcha && window.grecaptcha.enterprise)
+                                        : window.grecaptcha;
+                                    if (!apiRoot || typeof apiRoot.render !== 'function') {
+                                        reject(new Error('recaptcha_render_unavailable'));
+                                        return;
+                                    }
+
+                                    let settled = false;
+                                    const timeout = setTimeout(() => {
+                                        if (settled) return;
+                                        settled = true;
+                                        reject(new Error('timeout'));
+                                    }, 30000);
+
+                                    const done = (token) => {
+                                        if (settled || !token) return;
+                                        settled = true;
+                                        clearTimeout(timeout);
+                                        resolve(token);
+                                    };
+
+                                    const fail = (reason) => {
+                                        if (settled) return;
+                                        settled = true;
+                                        clearTimeout(timeout);
+                                        reject(new Error(String(reason || 'recaptcha_v2_failed')));
+                                    };
+
+                                    try {
+                                        const host = document.createElement('div');
+                                        host.id = `fcs-recaptcha-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+                                        host.style.position = 'fixed';
+                                        host.style.left = '-9999px';
+                                        host.style.top = '0';
+                                        document.body.appendChild(host);
+
+                                        const widgetId = apiRoot.render(host, {
+                                            sitekey: siteKey,
+                                            size: invisibleMode ? 'invisible' : 'normal',
+                                            badge: 'bottomright',
+                                            callback: done,
+                                            'error-callback': () => fail('error-callback'),
+                                            'expired-callback': () => fail('expired-callback'),
+                                            action: actionName || undefined,
+                                        });
+
+                                        if (typeof apiRoot.execute === 'function') {
+                                            try {
+                                                const executeResult = apiRoot.execute(widgetId);
+                                                if (executeResult && typeof executeResult.then === 'function') {
+                                                    executeResult
+                                                        .then((resultToken) => {
+                                                            if (resultToken) done(resultToken);
+                                                        })
+                                                        .catch((error) => fail(error && error.message ? error.message : String(error)));
+                                                }
+                                            } catch (e) {
+                                                if (invisibleMode) {
+                                                    fail(e && e.message ? e.message : String(e));
+                                                    return;
+                                                }
+                                            }
+                                        }
+
+                                        const probe = () => {
+                                            if (settled) return;
+                                            const input = document.querySelector('textarea[name="g-recaptcha-response"]');
+                                            const currentToken = input && input.value ? String(input.value).trim() : '';
+                                            if (currentToken) {
+                                                done(currentToken);
+                                                return;
+                                            }
+                                            setTimeout(probe, 500);
+                                        };
+                                        setTimeout(probe, 800);
+                                    } catch (e) {
+                                        fail(e && e.message ? e.message : String(e));
+                                    }
+                                });
+                            }
+                        """,
+                        {
+                            "siteKey": website_key,
+                            "actionName": action,
+                            "enterpriseMode": enterprise,
+                            "invisibleMode": bool(is_invisible),
+                        },
+                    ),
+                    timeout=45,
+                )
+            else:
+                token = await asyncio.wait_for(
+                    page.evaluate(
+                        f"""
+                            (actionName) => {{
+                                return new Promise((resolve, reject) => {{
+                                    const timeout = setTimeout(() => reject(new Error('timeout')), 25000);
+                                    try {{
+                                        {runtime['ready_target']}(function() {{
+                                            {runtime['execute_target']}('{website_key}', {{action: actionName}})
+                                                .then(t => {{
+                                                    clearTimeout(timeout);
+                                                    resolve(t);
+                                                }})
+                                                .catch(e => {{
+                                                    clearTimeout(timeout);
+                                                    reject(e);
+                                                }});
+                                        }});
+                                    }} catch (e) {{
+                                        clearTimeout(timeout);
+                                        reject(e);
+                                    }}
+                                }});
+                            }}
+                        """,
+                        action,
+                    ),
+                    timeout=30,
+                )
 
             post_wait_seconds = float(getattr(config, "browser_recaptcha_settle_seconds", 3) or 3)
             if post_wait_seconds > 0:
@@ -1820,9 +2191,11 @@ class TokenBrowser:
         except Exception as e:
             msg = f"{type(e).__name__}: {str(e)}"
             debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 自定义打码失败: {msg[:200]}")
+            if reuse_ready_page and custom_key:
+                await self._drop_shared_custom_page(custom_key)
             return None
         finally:
-            if page:
+            if page and not reuse_ready_page:
                 try:
                     await page.close()
                 except:
@@ -1841,7 +2214,13 @@ class TokenBrowser:
         return max(0.0, time.monotonic() - self._last_idle_since)
 
     def has_shared_browser(self) -> bool:
-        return bool(self._shared_browser or self._shared_context or self._shared_keepalive_page)
+        return bool(
+            self._shared_browser
+            or self._shared_context
+            or self._shared_keepalive_page
+            or self._shared_ready_page
+            or self._shared_custom_pages
+        )
 
     def get_last_fingerprint(self) -> Optional[Dict[str, Any]]:
         """返回最近一次打码浏览器的指纹快照。"""
@@ -1947,52 +2326,62 @@ class TokenBrowser:
         action: str = "homepage",
         enterprise: bool = False,
         token_proxy_url: Optional[str] = None,
+        captcha_type: str = "recaptcha_v3",
+        is_invisible: bool = True,
     ) -> Optional[str]:
-        """Get a custom reCAPTCHA token using a temporary browser."""
+        """Get a custom reCAPTCHA token using the shared browser whenever possible."""
         async with self._semaphore:
             self._solve_inflight += 1
             max_retries = 3
 
             try:
                 for attempt in range(max_retries):
-                    playwright = None
-                    browser = None
-                    context = None
                     try:
                         start_ts = time.time()
-                        playwright, browser, context = await self._create_browser(token_proxy_url=token_proxy_url, manage_slot_pid=False)
+                        _, _, context = await self._get_or_create_shared_browser(token_proxy_url=token_proxy_url)
                         token = await self._execute_custom_captcha(
                             context=context,
                             website_url=website_url,
                             website_key=website_key,
                             action=action,
                             enterprise=enterprise,
+                            captcha_type=captcha_type,
+                            is_invisible=is_invisible,
+                            reuse_ready_page=True,
                         )
 
                         if token:
                             self._solve_count += 1
+                            self._consecutive_browser_failures = 0
                             debug_logger.log_info(
-                                f"[BrowserCaptcha] Token-{self.token_id} custom token acquired ({(time.time()-start_ts)*1000:.0f}ms)"
+                                f"[BrowserCaptcha] Token-{self.token_id} custom token acquired "
+                                f"({(time.time()-start_ts)*1000:.0f}ms, launches={self._shared_launch_count}, reuse={self._shared_reuse_count})"
                             )
                             return token
 
                         self._error_count += 1
+                        self._consecutive_browser_failures += 1
                         debug_logger.log_warning(
                             f"[BrowserCaptcha] Token-{self.token_id} custom token attempt {attempt+1}/{max_retries} failed"
                         )
+                        if self._consecutive_browser_failures >= 2:
+                            await self.recycle_browser(reason=f"custom_token_failed_{attempt + 1}", rotate_profile=False)
                     except Exception as e:
                         self._error_count += 1
+                        self._consecutive_browser_failures += 1
                         debug_logger.log_error(
                             f"[BrowserCaptcha] Token-{self.token_id} custom browser error: {type(e).__name__}: {str(e)[:200]}"
                         )
-                    finally:
-                        await self._close_browser(
-                            playwright,
-                            browser,
-                            context,
-                            driver_proc=self._extract_driver_proc(playwright=playwright, browser=browser),
-                            clear_slot_pid=False,
-                        )
+                        error_lower = str(e).lower()
+                        if any(keyword in error_lower for keyword in [
+                            "context or browser has been closed",
+                            "target closed",
+                            "browser has been closed",
+                            "connection closed",
+                            "crash",
+                            "closed",
+                        ]):
+                            await self.recycle_browser(reason="custom_browser_runtime_error", rotate_profile=False)
 
                     if attempt < max_retries - 1:
                         await asyncio.sleep(1)
@@ -2011,19 +2400,16 @@ class TokenBrowser:
         enterprise: bool = False,
         token_proxy_url: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Get a custom token and verify its score using a temporary browser."""
+        """Get a custom token and verify its score using the shared browser whenever possible."""
         async with self._semaphore:
             self._solve_inflight += 1
             max_retries = 3
 
             try:
                 for attempt in range(max_retries):
-                    playwright = None
-                    browser = None
-                    context = None
                     try:
                         started_at = time.time()
-                        playwright, browser, context = await self._create_browser(token_proxy_url=token_proxy_url, manage_slot_pid=False)
+                        _, _, context = await self._get_or_create_shared_browser(token_proxy_url=token_proxy_url)
                         payload = await self._execute_custom_captcha(
                             context=context,
                             website_url=website_url,
@@ -2031,33 +2417,42 @@ class TokenBrowser:
                             action=action,
                             verify_url=verify_url,
                             enterprise=enterprise,
+                            reuse_ready_page=True,
                         )
 
                         if isinstance(payload, dict) and payload.get("token"):
                             self._solve_count += 1
+                            self._consecutive_browser_failures = 0
                             payload.setdefault("token_elapsed_ms", int((time.time() - started_at) * 1000))
                             debug_logger.log_info(
-                                f"[BrowserCaptcha] Token-{self.token_id} in-page score verification succeeded ({(time.time()-started_at)*1000:.0f}ms)"
+                                f"[BrowserCaptcha] Token-{self.token_id} in-page score verification succeeded "
+                                f"({(time.time()-started_at)*1000:.0f}ms, launches={self._shared_launch_count}, reuse={self._shared_reuse_count})"
                             )
                             return payload
 
                         self._error_count += 1
+                        self._consecutive_browser_failures += 1
                         debug_logger.log_warning(
                             f"[BrowserCaptcha] Token-{self.token_id} in-page score attempt {attempt+1}/{max_retries} failed"
                         )
+                        if self._consecutive_browser_failures >= 2:
+                            await self.recycle_browser(reason=f"custom_score_failed_{attempt + 1}", rotate_profile=False)
                     except Exception as e:
                         self._error_count += 1
+                        self._consecutive_browser_failures += 1
                         debug_logger.log_error(
                             f"[BrowserCaptcha] Token-{self.token_id} in-page score browser error: {type(e).__name__}: {str(e)[:200]}"
                         )
-                    finally:
-                        await self._close_browser(
-                            playwright,
-                            browser,
-                            context,
-                            driver_proc=self._extract_driver_proc(playwright=playwright, browser=browser),
-                            clear_slot_pid=False,
-                        )
+                        error_lower = str(e).lower()
+                        if any(keyword in error_lower for keyword in [
+                            "context or browser has been closed",
+                            "target closed",
+                            "browser has been closed",
+                            "connection closed",
+                            "crash",
+                            "closed",
+                        ]):
+                            await self.recycle_browser(reason="custom_score_browser_runtime_error", rotate_profile=False)
 
                     if attempt < max_retries - 1:
                         await asyncio.sleep(1)
@@ -2702,14 +3097,17 @@ class BrowserCaptchaService:
         website_key: str,
         action: str = "homepage",
         enterprise: bool = False,
+        captcha_type: str = "recaptcha_v3",
+        is_invisible: bool = True,
     ) -> tuple[Optional[str], int]:
         """获取任意站点的 reCAPTCHA token，用于分数测试。"""
         self._check_available()
         token_proxy_url = await self._resolve_global_proxy_url()
+        custom_slot_key = f"custom:{captcha_type}:{1 if enterprise else 0}:{website_key}:{website_url}"
 
         if self._token_semaphore:
             async with self._token_semaphore:
-                browser_id = self._get_next_browser_id()
+                browser_id = await self._select_browser_id(custom_slot_key)
                 browser = await self._get_or_create_browser(browser_id)
                 token = await browser.get_custom_token(
                     website_url=website_url,
@@ -2717,10 +3115,12 @@ class BrowserCaptchaService:
                     action=action,
                     enterprise=enterprise,
                     token_proxy_url=token_proxy_url,
+                    captcha_type=captcha_type,
+                    is_invisible=is_invisible,
                 )
             return token, browser_id
 
-        browser_id = self._get_next_browser_id()
+        browser_id = await self._select_browser_id(custom_slot_key)
         browser = await self._get_or_create_browser(browser_id)
         token = await browser.get_custom_token(
             website_url=website_url,
@@ -2728,6 +3128,8 @@ class BrowserCaptchaService:
             action=action,
             enterprise=enterprise,
             token_proxy_url=token_proxy_url,
+            captcha_type=captcha_type,
+            is_invisible=is_invisible,
         )
         return token, browser_id
 
@@ -2742,10 +3144,11 @@ class BrowserCaptchaService:
         """在浏览器页面内完成 token 获取与分数校验。"""
         self._check_available()
         token_proxy_url = await self._resolve_global_proxy_url()
+        custom_slot_key = f"custom_score:{1 if enterprise else 0}:{website_key}:{website_url}"
 
         if self._token_semaphore:
             async with self._token_semaphore:
-                browser_id = self._get_next_browser_id()
+                browser_id = await self._select_browser_id(custom_slot_key)
                 browser = await self._get_or_create_browser(browser_id)
                 payload = await browser.get_custom_score(
                     website_url=website_url,
@@ -2757,7 +3160,7 @@ class BrowserCaptchaService:
                 )
             return payload, browser_id
 
-        browser_id = self._get_next_browser_id()
+        browser_id = await self._select_browser_id(custom_slot_key)
         browser = await self._get_or_create_browser(browser_id)
         payload = await browser.get_custom_score(
             website_url=website_url,

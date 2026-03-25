@@ -85,6 +85,52 @@ class BrowserProcessCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminated, [(11, "stale_slot_process"), (22, "stale_slot_process")])
         write_pid_file.assert_called_once_with(None)
 
+    async def test_custom_token_uses_shared_browser_path(self):
+        context = object()
+        with patch.object(
+            self.browser,
+            "_get_or_create_shared_browser",
+            AsyncMock(return_value=(None, None, context)),
+        ) as get_shared_browser:
+            with patch.object(
+                self.browser,
+                "_execute_custom_captcha",
+                AsyncMock(return_value="custom-token"),
+            ) as execute_custom_captcha:
+                with patch.object(self.browser, "_create_browser", AsyncMock(side_effect=AssertionError("unexpected"))):
+                    token = await self.browser.get_custom_token(
+                        website_url="https://example.com",
+                        website_key="site-key",
+                        action="homepage",
+                    )
+
+        self.assertEqual(token, "custom-token")
+        get_shared_browser.assert_awaited_once()
+        execute_custom_captcha.assert_awaited_once()
+        self.assertTrue(execute_custom_captcha.await_args.kwargs["reuse_ready_page"])
+
+    async def test_custom_token_failures_trigger_browser_recycle(self):
+        context = object()
+        with patch.object(
+            self.browser,
+            "_get_or_create_shared_browser",
+            AsyncMock(return_value=(None, None, context)),
+        ):
+            with patch.object(
+                self.browser,
+                "_execute_custom_captcha",
+                AsyncMock(side_effect=[None, None, None]),
+            ):
+                with patch.object(self.browser, "recycle_browser", AsyncMock()) as recycle_browser:
+                    token = await self.browser.get_custom_token(
+                        website_url="https://example.com",
+                        website_key="site-key",
+                        action="homepage",
+                    )
+
+        self.assertIsNone(token)
+        self.assertGreaterEqual(recycle_browser.await_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

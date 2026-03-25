@@ -469,6 +469,17 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
                 raise HTTPException(status_code=400, detail="log.level 仅支持 DEBUG/INFO/WARNING/ERROR/CRITICAL")
             section["level"] = level
             changed_keys.append("log.level")
+        if "startup_clear_on_boot" in log_cfg:
+            section["startup_clear_on_boot"] = bool(log_cfg.get("startup_clear_on_boot"))
+            changed_keys.append("log.startup_clear_on_boot")
+        if "auto_clear_interval_minutes" in log_cfg:
+            section["auto_clear_interval_minutes"] = _as_int(
+                log_cfg.get("auto_clear_interval_minutes"),
+                "log.auto_clear_interval_minutes",
+                0,
+                10080,
+            )
+            changed_keys.append("log.auto_clear_interval_minutes")
         if section:
             updates["log"] = section
 
@@ -659,6 +670,7 @@ async def update_system_config(
 
     _validate_subnode_fields_before_persist(updates)
     config.update_config_sections(updates)
+    await _db.start_periodic_log_cleanup()
 
     if "log.level" in changed_keys:
         debug_logger.refresh_level()

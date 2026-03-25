@@ -96,6 +96,36 @@ class CaptchaRuntime:
         payload["node_name"] = config.node_name
         return payload
 
+    async def custom_token(
+        self,
+        website_url: str,
+        website_key: str,
+        action: str,
+        enterprise: bool,
+        captcha_type: str = "recaptcha_v3",
+        is_invisible: bool = True,
+    ) -> Dict[str, Any]:
+        service = await self._get_browser_service()
+        token, browser_id = await service.get_custom_token(
+            website_url=website_url,
+            website_key=website_key,
+            action=action,
+            enterprise=enterprise,
+            captcha_type=captcha_type,
+            is_invisible=is_invisible,
+        )
+        token = str(token or "").strip()
+        if not token:
+            raise RuntimeError("通用打码失败，未获取到 token")
+
+        fingerprint = await service.get_fingerprint(browser_id)
+        return {
+            "token": token,
+            "browser_id": browser_id,
+            "fingerprint": fingerprint,
+            "node_name": config.node_name,
+        }
+
     async def finish(self, session_id: str) -> Tuple[bool, str, Optional[SessionEntry]]:
         entry = await self.registry.get(session_id)
         if not entry:

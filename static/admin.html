@@ -2051,9 +2051,13 @@
 
           <div class="grid">
             <div class="field"><label>日志级别</label><select id="cfgLogLevel"><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option><option value="CRITICAL">CRITICAL</option></select></div>
+            <div class="field"><label>自动清空日志间隔（分钟）</label><input id="cfgLogAutoClearMinutes" type="number" min="0" /><div class="hint">填 0 表示关闭。仅清空日志，不影响用户剩余次数和已用次数。</div></div>
             <div class="field"><label>流程超时（秒）</label><input id="cfgFlowTimeout" type="number" min="10" /></div>
             <div class="field"><label>放大超时（秒）</label><input id="cfgUpsampleTimeout" type="number" min="10" /></div>
             <div class="field"><label>会话保留时长（秒）</label><input id="cfgSessionTtl" type="number" min="120" /></div>
+          </div>
+          <div class="grid">
+            <label class="checkbox-line"><input id="cfgLogStartupClear" type="checkbox" /> 启动后自动清空历史日志</label>
           </div>
 
           <div class="grid">
@@ -2631,6 +2635,8 @@
         q("cfgServerHost").value = cfg.server?.host || "";
         q("cfgServerPort").value = cfg.server?.port ?? 8060;
         q("cfgLogLevel").value = cfg.log?.level || "INFO";
+        q("cfgLogAutoClearMinutes").value = cfg.log?.auto_clear_interval_minutes ?? 0;
+        q("cfgLogStartupClear").checked = !!cfg.log?.startup_clear_on_boot;
         q("cfgPortalPublicBaseUrl").value = cfg.portal?.public_base_url || "";
         q("cfgOidcEnabled").checked = !!cfg.portal?.oidc_enabled;
         q("cfgOauthOnly").checked = !!cfg.portal?.oauth_only;
@@ -2703,7 +2709,11 @@
             browser_recaptcha_settle_seconds: toFloat(q("cfgSettle").value, 3),
             browser_score_test_warmup_seconds: toFloat(q("cfgWarmup").value, 12),
           },
-          log: { level: q("cfgLogLevel").value },
+          log: {
+            level: q("cfgLogLevel").value,
+            startup_clear_on_boot: q("cfgLogStartupClear").checked,
+            auto_clear_interval_minutes: toInt(q("cfgLogAutoClearMinutes").value, 0),
+          },
           cluster: { role },
         };
 

@@ -206,6 +206,46 @@ class ClusterManager:
                 )
             await asyncio.sleep(self._dispatch_poll_interval_seconds())
 
+    async def dispatch_custom_token(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        last_error = ""
+
+        while True:
+            nodes = await self._select_candidate_nodes()
+            if not nodes:
+                await asyncio.sleep(self._dispatch_poll_interval_seconds())
+                continue
+
+            dispatched_this_round = False
+            for node in nodes:
+                reserved = await self._try_reserve_dispatch_slot(node)
+                if not reserved:
+                    continue
+
+                dispatched_this_round = True
+                node_id = int(node.get("id") or 0)
+                try:
+                    result = await self._post_to_node(
+                        node=node,
+                        path="/api/v1/custom-token",
+                        json_payload=request_payload,
+                        timeout=config.cluster_master_dispatch_timeout_seconds,
+                    )
+                    await self._release_dispatch_slot(node_id)
+                    return result
+                except Exception as e:
+                    await self._release_dispatch_slot(node_id)
+                    last_error = str(e)
+                    await self.db.mark_cluster_node_error(int(node["id"]), last_error, error_type="dispatch")
+                    debug_logger.log_warning(
+                        f"[ClusterManager] dispatch custom-token node={node['node_name']} {diag_label(e)} failed: {last_error}"
+                    )
+
+            if dispatched_this_round and last_error:
+                debug_logger.log_warning(
+                    f"[ClusterManager] dispatch custom-token round failed, will retry: {last_error}"
+                )
+            await asyncio.sleep(self._dispatch_poll_interval_seconds())
+
     async def register_node(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         effective_capacity = self._as_positive_int(
             payload.get("effective_capacity") or payload.get("max_concurrency"),

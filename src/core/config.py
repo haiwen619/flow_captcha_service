@@ -68,6 +68,19 @@ def _positive_int_or_fallback(value: Any, fallback: int) -> int:
         return max(1, int(fallback))
     return number
 
+
+def _bounded_int_or_fallback(value: Any, fallback: int, minimum: int) -> int:
+    if value is None:
+        return max(minimum, int(fallback))
+    text = str(value).strip()
+    if text == "":
+        return max(minimum, int(fallback))
+    try:
+        number = int(text)
+    except Exception:
+        return max(minimum, int(fallback))
+    return max(minimum, number)
+
 class Config:
     ORDERED_TOP_SECTIONS = ("server", "storage", "admin", "portal", "captcha", "log", "cluster")
     ENV_OVERRIDE_KEYS = (
@@ -90,6 +103,12 @@ class Config:
         "FCS_BROWSER_PROXY_ENABLED",
         "FCS_BROWSER_PROXY_URL",
         "FCS_LOG_LEVEL",
+        "FCS_LOG_STORAGE_BACKEND",
+        "FCS_LOG_REDIS_URL",
+        "FCS_LOG_REDIS_KEY_PREFIX",
+        "FCS_LOG_REDIS_MAX_ENTRIES",
+        "FCS_LOG_STARTUP_CLEAR_ON_BOOT",
+        "FCS_LOG_AUTO_CLEAR_INTERVAL_MINUTES",
         "FCS_CLUSTER_ROLE",
         "FCS_CLUSTER_MASTER_BASE_URL",
         "FCS_CLUSTER_MASTER_CLUSTER_KEY",
@@ -177,6 +196,12 @@ class Config:
             },
             "log": {
                 "level": "INFO",
+                "storage_backend": "sqlite",
+                "redis_url": "",
+                "redis_key_prefix": "fcs",
+                "redis_max_entries": 20000,
+                "startup_clear_on_boot": True,
+                "auto_clear_interval_minutes": 0,
             },
             "cluster": {
                 "role": "standalone",
@@ -502,6 +527,62 @@ class Config:
     @property
     def log_level(self) -> str:
         return str(os.getenv("FCS_LOG_LEVEL", self._get("log", "level", "INFO"))).upper()
+
+    @property
+    def log_storage_backend(self) -> str:
+        value = str(
+            os.getenv(
+                "FCS_LOG_STORAGE_BACKEND",
+                self._get("log", "storage_backend", "sqlite"),
+            )
+        ).strip().lower()
+        return value if value in {"sqlite", "redis"} else "sqlite"
+
+    @property
+    def log_redis_url(self) -> str:
+        return str(os.getenv("FCS_LOG_REDIS_URL", self._get("log", "redis_url", ""))).strip()
+
+    @property
+    def log_redis_key_prefix(self) -> str:
+        return str(
+            os.getenv(
+                "FCS_LOG_REDIS_KEY_PREFIX",
+                self._get("log", "redis_key_prefix", "fcs"),
+            )
+        ).strip() or "fcs"
+
+    @property
+    def log_redis_max_entries(self) -> int:
+        return _bounded_int_or_fallback(
+            os.getenv("FCS_LOG_REDIS_MAX_ENTRIES", self._get("log", "redis_max_entries", 20000)),
+            20000,
+            100,
+        )
+
+    @property
+    def log_startup_clear_on_boot(self) -> bool:
+        return _as_bool(
+            os.getenv(
+                "FCS_LOG_STARTUP_CLEAR_ON_BOOT",
+                self._get("log", "startup_clear_on_boot", True),
+            ),
+            True,
+        )
+
+    @property
+    def log_auto_clear_interval_minutes(self) -> int:
+        return _bounded_int_or_fallback(
+            os.getenv(
+                "FCS_LOG_AUTO_CLEAR_INTERVAL_MINUTES",
+                self._get("log", "auto_clear_interval_minutes", 0),
+            ),
+            0,
+            0,
+        )
+
+    @property
+    def log_redis_enabled(self) -> bool:
+        return self.log_storage_backend == "redis"
 
     @property
     def cluster_role(self) -> str:

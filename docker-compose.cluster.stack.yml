@@ -1,9 +1,26 @@
 services:
+  flow-captcha-redis:
+    image: redis:7-alpine
+    container_name: flow-captcha-redis
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
   flow-captcha-master:
     build:
       context: .
       dockerfile: Dockerfile.master
     container_name: flow-captcha-master
+    depends_on:
+      flow-captcha-redis:
+        condition: service_healthy
     ports:
       - "8060:8060"
     environment:
@@ -13,6 +30,11 @@ services:
       - FCS_CLUSTER_ROLE=master
       - FCS_NODE_NAME=${FCS_MASTER_NODE_NAME:-master-1}
       - FCS_LOG_LEVEL=${FCS_LOG_LEVEL:-INFO}
+      - FCS_LOG_STORAGE_BACKEND=${FCS_LOG_STORAGE_BACKEND:-redis}
+      - FCS_LOG_REDIS_URL=${FCS_LOG_REDIS_URL:-redis://flow-captcha-redis:6379/0}
+      - FCS_LOG_REDIS_KEY_PREFIX=${FCS_LOG_REDIS_KEY_PREFIX:-fcs}
+      - FCS_LOG_REDIS_MAX_ENTRIES=${FCS_LOG_REDIS_MAX_ENTRIES:-20000}
+      - FCS_LOG_STARTUP_CLEAR_ON_BOOT=${FCS_LOG_STARTUP_CLEAR_ON_BOOT:-true}
     volumes:
       - ./data/master:/app/data
       - ./config:/app/config

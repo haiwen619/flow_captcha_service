@@ -5,6 +5,8 @@ import hashlib
 import json
 import random
 import secrets
+import time
+from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,17 +14,24 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiosqlite
 
 from .config import config
+from .log_store import RedisLogStore
 from .logger import debug_logger
 from .models import CaptchaConfig
 
 
 class Database:
     SQLITE_BUSY_TIMEOUT_MS = 30000
+    PERIODIC_LOG_VACUUM_ROW_THRESHOLD = 5000
+    PERIODIC_LOG_VACUUM_MIN_INTERVAL_SECONDS = 1800
 
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path or config.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_lock = asyncio.Lock()
+        self._redis_log_store: Optional[RedisLogStore] = None
+        self._log_cleanup_task: Optional[asyncio.Task] = None
+        self._last_log_vacuum_monotonic = 0.0
+        self._periodic_log_deleted_since_vacuum = 0
 
     @asynccontextmanager
     async def _connect(self):
@@ -40,6 +49,54 @@ class Database:
             async with self._connect() as db:
                 yield db
 
+    async def initialize_log_store(self):
+        if not config.log_redis_enabled:
+            return
+        redis_url = config.log_redis_url
+        if not redis_url:
+            raise RuntimeError("已启用 Redis 日志存储，但未配置 log.redis_url / FCS_LOG_REDIS_URL")
+        self._redis_log_store = RedisLogStore(
+            redis_url=redis_url,
+            key_prefix=config.log_redis_key_prefix,
+            max_entries=config.log_redis_max_entries,
+        )
+        await self._redis_log_store.connect()
+
+    async def close(self):
+        if self._log_cleanup_task and not self._log_cleanup_task.done():
+            self._log_cleanup_task.cancel()
+            try:
+                await self._log_cleanup_task
+            except asyncio.CancelledError:
+                pass
+        self._log_cleanup_task = None
+        if self._redis_log_store is not None:
+            await self._redis_log_store.close()
+            self._redis_log_store = None
+        self._last_log_vacuum_monotonic = 0.0
+        self._periodic_log_deleted_since_vacuum = 0
+
+    def _job_logs_use_redis(self) -> bool:
+        return self._redis_log_store is not None and config.log_redis_enabled
+
+    def _cluster_logs_use_redis(self) -> bool:
+        return self._redis_log_store is not None and config.log_redis_enabled
+
+    def _should_vacuum_periodic_logs(self, deleted_rows: int) -> bool:
+        safe_deleted_rows = max(0, int(deleted_rows or 0))
+        self._periodic_log_deleted_since_vacuum += safe_deleted_rows
+        if self._periodic_log_deleted_since_vacuum < self.PERIODIC_LOG_VACUUM_ROW_THRESHOLD:
+            return False
+        now_monotonic = time.monotonic()
+        if (
+            self._last_log_vacuum_monotonic > 0
+            and (now_monotonic - self._last_log_vacuum_monotonic) < self.PERIODIC_LOG_VACUUM_MIN_INTERVAL_SECONDS
+        ):
+            return False
+        self._periodic_log_deleted_since_vacuum = 0
+        self._last_log_vacuum_monotonic = now_monotonic
+        return True
+
     @staticmethod
     def _normalize_optional_positive_int(value: Optional[int]) -> Optional[int]:
         try:
@@ -47,6 +104,261 @@ class Database:
         except (TypeError, ValueError):
             return None
         return normalized if normalized > 0 else None
+
+    @staticmethod
+    def _terminal_job_statuses() -> tuple[str, ...]:
+        return (
+            "finish:success",
+            "finish:failed",
+            "finish:cancelled",
+            "finish:timeout",
+            "error_reported",
+        )
+
+    async def _mark_session_complete_in_tx(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        session_id: Optional[str],
+        owner_type: str,
+        owner_id: Optional[int],
+        note: Optional[str] = None,
+    ):
+        normalized_session_id = str(session_id or "").strip()
+        normalized_owner_id = int(owner_id or 0)
+        if not normalized_session_id or normalized_owner_id <= 0:
+            return
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
+            VALUES (?, ?, ?, 'complete', ?)
+            """,
+            (normalized_session_id, owner_type, normalized_owner_id, (note or "")[:200] or None),
+        )
+
+    async def _backfill_session_completion_events_in_tx(self, db: aiosqlite.Connection) -> Dict[str, int]:
+        terminal_statuses = self._terminal_job_statuses()
+        placeholders = ",".join(["?"] * len(terminal_statuses))
+
+        service_cursor = await db.execute(
+            f"""
+            INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
+            SELECT e.session_id, 'service_api_key', e.owner_id, 'complete', 'startup_backfill'
+            FROM session_quota_events e
+            WHERE e.owner_type = 'service_api_key'
+              AND e.event_type = 'charge'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM session_quota_events c
+                WHERE c.session_id = e.session_id
+                  AND c.owner_type = e.owner_type
+                  AND c.owner_id = e.owner_id
+                  AND c.event_type = 'complete'
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM captcha_jobs cj
+                WHERE cj.api_key_id = e.owner_id
+                  AND cj.session_id = e.session_id
+                  AND cj.status IN ({placeholders})
+              )
+            """,
+            terminal_statuses,
+        )
+
+        portal_cursor = await db.execute(
+            f"""
+            INSERT OR IGNORE INTO session_quota_events (session_id, owner_type, owner_id, event_type, note)
+            SELECT e.session_id, 'portal_user', e.owner_id, 'complete', 'startup_backfill'
+            FROM session_quota_events e
+            WHERE e.owner_type = 'portal_user'
+              AND e.event_type = 'charge'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM session_quota_events c
+                WHERE c.session_id = e.session_id
+                  AND c.owner_type = e.owner_type
+                  AND c.owner_id = e.owner_id
+                  AND c.event_type = 'complete'
+              )
+              AND (
+                EXISTS (
+                  SELECT 1
+                  FROM portal_user_jobs pj
+                  WHERE pj.portal_user_id = e.owner_id
+                    AND pj.session_id = e.session_id
+                    AND pj.status IN ({placeholders})
+                )
+                OR EXISTS (
+                  SELECT 1
+                  FROM captcha_jobs cj
+                  WHERE cj.portal_user_id = e.owner_id
+                    AND cj.session_id = e.session_id
+                    AND cj.status IN ({placeholders})
+                )
+              )
+            """,
+            (*terminal_statuses, *terminal_statuses),
+        )
+
+        return {
+            "service_api_key_complete": int(service_cursor.rowcount or 0),
+            "portal_user_complete": int(portal_cursor.rowcount or 0),
+        }
+
+    async def _clear_log_tables_in_tx(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        reset_sequences: bool,
+        clear_cluster_node_last_error: bool,
+    ) -> Dict[str, int]:
+        captcha_cursor = await db.execute("DELETE FROM captcha_jobs")
+        portal_cursor = await db.execute("DELETE FROM portal_user_jobs")
+        heartbeat_cursor = await db.execute("DELETE FROM cluster_node_heartbeats")
+        error_cursor = await db.execute("DELETE FROM cluster_node_errors")
+        if clear_cluster_node_last_error:
+            await db.execute(
+                """
+                UPDATE cluster_nodes
+                SET last_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE last_error IS NOT NULL AND last_error <> ''
+                """
+            )
+        if reset_sequences:
+            await db.execute(
+                """
+                DELETE FROM sqlite_sequence
+                WHERE name IN ('captcha_jobs', 'portal_user_jobs', 'cluster_node_heartbeats', 'cluster_node_errors')
+                """
+            )
+        return {
+            "captcha_jobs": int(captcha_cursor.rowcount or 0),
+            "portal_user_jobs": int(portal_cursor.rowcount or 0),
+            "cluster_node_heartbeats": int(heartbeat_cursor.rowcount or 0),
+            "cluster_node_errors": int(error_cursor.rowcount or 0),
+        }
+
+    async def _checkpoint_and_vacuum_logs(self, *, reason: str, vacuum: bool):
+        try:
+            async with self._connect() as db:
+                await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                await db.commit()
+                if vacuum:
+                    await db.execute("VACUUM")
+                    self._last_log_vacuum_monotonic = time.monotonic()
+                    self._periodic_log_deleted_since_vacuum = 0
+        except Exception as exc:
+            action = "VACUUM" if vacuum else "checkpoint"
+            debug_logger.log_warning(f"[Database] {reason} {action} failed: {exc}")
+
+    async def startup_log_maintenance(self) -> Dict[str, int]:
+        if not config.log_startup_clear_on_boot:
+            return {
+                "captcha_jobs": 0,
+                "portal_user_jobs": 0,
+                "cluster_node_heartbeats": 0,
+                "cluster_node_errors": 0,
+                "backfilled_complete_events": 0,
+            }
+
+        async with self._write_connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                backfill = await self._backfill_session_completion_events_in_tx(db)
+                cleanup_result = await self._clear_log_tables_in_tx(
+                    db,
+                    reset_sequences=True,
+                    clear_cluster_node_last_error=True,
+                )
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+        await self._checkpoint_and_vacuum_logs(reason="startup", vacuum=True)
+
+        return {
+            "captcha_jobs": int(cleanup_result["captcha_jobs"]),
+            "portal_user_jobs": int(cleanup_result["portal_user_jobs"]),
+            "cluster_node_heartbeats": int(cleanup_result["cluster_node_heartbeats"]),
+            "cluster_node_errors": int(cleanup_result["cluster_node_errors"]),
+            "backfilled_complete_events": int(backfill["service_api_key_complete"]) + int(backfill["portal_user_complete"]),
+        }
+
+    async def start_periodic_log_cleanup(self):
+        interval_minutes = int(config.log_auto_clear_interval_minutes or 0)
+        if self._log_cleanup_task and not self._log_cleanup_task.done():
+            self._log_cleanup_task.cancel()
+            try:
+                await self._log_cleanup_task
+            except asyncio.CancelledError:
+                pass
+        self._log_cleanup_task = None
+        if interval_minutes <= 0:
+            return
+        self._log_cleanup_task = asyncio.create_task(self._periodic_log_cleanup_loop(interval_minutes))
+
+    async def clear_runtime_logs(self) -> Dict[str, int]:
+        result = {"captcha_jobs": 0, "portal_user_jobs": 0, "cluster_node_heartbeats": 0, "cluster_node_errors": 0}
+
+        if self._redis_log_store is not None and config.log_redis_enabled:
+            redis_result = await self._redis_log_store.clear_job_logs_with_breakdown()
+            result["captcha_jobs"] += int(redis_result.get("captcha_jobs") or 0)
+            result["portal_user_jobs"] += int(redis_result.get("portal_user_jobs") or 0)
+
+            nodes = await self.list_cluster_nodes()
+            for node in nodes:
+                node_id = int(node.get("id") or 0)
+                if node_id <= 0:
+                    continue
+                result["cluster_node_heartbeats"] += await self._redis_log_store.clear_cluster_heartbeats(node_id=node_id)
+                result["cluster_node_errors"] += await self._redis_log_store.clear_cluster_errors(node_id=node_id)
+
+        async with self._write_connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                sqlite_result = await self._clear_log_tables_in_tx(
+                    db,
+                    reset_sequences=False,
+                    clear_cluster_node_last_error=False,
+                )
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+        for key, value in sqlite_result.items():
+            result[key] += int(value or 0)
+
+        total_deleted = sum(int(result.get(key) or 0) for key in result)
+        if total_deleted > 0:
+            await self._checkpoint_and_vacuum_logs(
+                reason="periodic",
+                vacuum=self._should_vacuum_periodic_logs(total_deleted),
+            )
+        return result
+
+    async def _periodic_log_cleanup_loop(self, interval_minutes: int):
+        interval_seconds = max(60, int(interval_minutes) * 60)
+        while True:
+            try:
+                await asyncio.sleep(interval_seconds)
+                result = await self.clear_runtime_logs()
+                total_deleted = sum(int(result.get(key) or 0) for key in result)
+                if total_deleted > 0:
+                    debug_logger.log_info(
+                        "[log_cleanup] cleared logs "
+                        f"captcha_jobs={int(result.get('captcha_jobs') or 0)} "
+                        f"portal_user_jobs={int(result.get('portal_user_jobs') or 0)} "
+                        f"cluster_node_heartbeats={int(result.get('cluster_node_heartbeats') or 0)} "
+                        f"cluster_node_errors={int(result.get('cluster_node_errors') or 0)}"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                debug_logger.log_warning(f"[log_cleanup] periodic cleanup failed: {exc}")
 
     async def _create_portal_user_job_log_in_tx(
         self,
@@ -1131,6 +1443,20 @@ class Database:
         error_reason: Optional[str],
         duration_ms: Optional[int],
     ):
+        if self._job_logs_use_redis():
+            await self._redis_log_store.append_job_log(
+                {
+                    "log_scope": "portal_user_jobs",
+                    "portal_user_id": int(portal_user_id),
+                    "session_id": session_id,
+                    "project_id": project_id,
+                    "action": action,
+                    "status": status,
+                    "error_reason": error_reason,
+                    "duration_ms": duration_ms,
+                }
+            )
+            return
         async with self._write_connect() as db:
             await self._create_portal_user_job_log_in_tx(
                 db,
@@ -1144,6 +1470,197 @@ class Database:
             )
             await db.commit()
 
+    def _normalize_redis_job_log(self, raw: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw, dict):
+            return None
+        item = dict(raw)
+        item["id"] = int(item.get("id") or 0)
+        item["api_key_id"] = self._normalize_optional_positive_int(item.get("api_key_id"))
+        item["portal_user_id"] = self._normalize_optional_positive_int(item.get("portal_user_id"))
+        item["portal_api_key_id"] = self._normalize_optional_positive_int(item.get("portal_api_key_id"))
+        try:
+            item["duration_ms"] = int(item["duration_ms"]) if item.get("duration_ms") is not None else None
+        except (TypeError, ValueError):
+            item["duration_ms"] = None
+        item["log_scope"] = str(item.get("log_scope") or "captcha_jobs").strip() or "captcha_jobs"
+        return item
+
+    async def _get_redis_job_logs(self, *, limit: Optional[int] = None, offset: int = 0) -> List[Dict[str, Any]]:
+        if self._redis_log_store is None:
+            return []
+        if limit is None:
+            items = await self._redis_log_store.list_all_job_logs()
+        else:
+            safe_limit = max(1, int(limit or 1))
+            safe_offset = max(0, int(offset or 0))
+            items = await self._redis_log_store.list_job_logs(limit=safe_limit, offset=safe_offset)
+        normalized: List[Dict[str, Any]] = []
+        for raw in items:
+            item = self._normalize_redis_job_log(raw)
+            if item is not None:
+                normalized.append(item)
+        if limit is None:
+            normalized.sort(key=lambda item: (str(item.get("created_at") or ""), int(item.get("id") or 0)), reverse=True)
+        return normalized
+
+    async def _get_all_redis_job_logs(self) -> List[Dict[str, Any]]:
+        return await self._get_redis_job_logs(limit=None, offset=0)
+
+    async def _get_redis_job_logs_by_scope(
+        self,
+        *,
+        scope: str,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        if self._redis_log_store is None:
+            return []
+        normalized_scope = str(scope or "captcha_jobs").strip() or "captcha_jobs"
+        if await self._redis_log_store.job_log_scope_index_exists(scope=normalized_scope):
+            if limit is None:
+                items = await self._redis_log_store.list_all_job_logs_by_scope(scope=normalized_scope)
+            else:
+                items = await self._redis_log_store.list_job_logs_by_scope(
+                    scope=normalized_scope,
+                    limit=max(1, int(limit or 1)),
+                    offset=max(0, int(offset or 0)),
+                )
+            return [item for item in (self._normalize_redis_job_log(raw) for raw in items) if item is not None]
+
+        fallback_items = [
+            entry
+            for entry in await self._get_all_redis_job_logs()
+            if str(entry.get("log_scope") or "captcha_jobs").strip() == normalized_scope
+        ]
+        if limit is None:
+            return fallback_items
+        safe_limit = max(1, int(limit or 1))
+        safe_offset = max(0, int(offset or 0))
+        return fallback_items[safe_offset:safe_offset + safe_limit]
+
+    async def _count_redis_job_logs_by_scope(self, *, scope: str) -> int:
+        if self._redis_log_store is None:
+            return 0
+        normalized_scope = str(scope or "captcha_jobs").strip() or "captcha_jobs"
+        if await self._redis_log_store.job_log_scope_index_exists(scope=normalized_scope):
+            return await self._redis_log_store.count_job_logs_by_scope(scope=normalized_scope)
+        return sum(
+            1
+            for entry in await self._get_all_redis_job_logs()
+            if str(entry.get("log_scope") or "captcha_jobs").strip() == normalized_scope
+        )
+
+    async def _get_redis_job_logs_by_api_key(
+        self,
+        *,
+        api_key_id: int,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        if self._redis_log_store is None:
+            return []
+        normalized_api_key_id = int(api_key_id or 0)
+        if normalized_api_key_id <= 0:
+            return []
+        if await self._redis_log_store.job_log_api_key_index_exists(api_key_id=normalized_api_key_id):
+            if limit is None:
+                items = await self._redis_log_store.list_all_job_logs_by_api_key(api_key_id=normalized_api_key_id)
+            else:
+                items = await self._redis_log_store.list_job_logs_by_api_key(
+                    api_key_id=normalized_api_key_id,
+                    limit=max(1, int(limit or 1)),
+                    offset=max(0, int(offset or 0)),
+                )
+            return [item for item in (self._normalize_redis_job_log(raw) for raw in items) if item is not None]
+
+        fallback_items = [
+            entry
+            for entry in await self._get_all_redis_job_logs()
+            if int(entry.get("api_key_id") or 0) == normalized_api_key_id
+        ]
+        if limit is None:
+            return fallback_items
+        safe_limit = max(1, int(limit or 1))
+        safe_offset = max(0, int(offset or 0))
+        return fallback_items[safe_offset:safe_offset + safe_limit]
+
+    async def _count_redis_job_logs_by_api_key(self, *, api_key_id: int) -> int:
+        if self._redis_log_store is None:
+            return 0
+        normalized_api_key_id = int(api_key_id or 0)
+        if normalized_api_key_id <= 0:
+            return 0
+        if await self._redis_log_store.job_log_api_key_index_exists(api_key_id=normalized_api_key_id):
+            return await self._redis_log_store.count_job_logs_by_api_key(api_key_id=normalized_api_key_id)
+        return sum(
+            1
+            for entry in await self._get_all_redis_job_logs()
+            if int(entry.get("api_key_id") or 0) == normalized_api_key_id
+        )
+
+    async def _get_redis_job_logs_by_portal_user(
+        self,
+        *,
+        portal_user_id: int,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        if self._redis_log_store is None:
+            return []
+        normalized_portal_user_id = int(portal_user_id or 0)
+        if normalized_portal_user_id <= 0:
+            return []
+        if await self._redis_log_store.job_log_portal_user_index_exists(portal_user_id=normalized_portal_user_id):
+            if limit is None:
+                items = await self._redis_log_store.list_all_job_logs_by_portal_user(portal_user_id=normalized_portal_user_id)
+            else:
+                items = await self._redis_log_store.list_job_logs_by_portal_user(
+                    portal_user_id=normalized_portal_user_id,
+                    limit=max(1, int(limit or 1)),
+                    offset=max(0, int(offset or 0)),
+                )
+            return [item for item in (self._normalize_redis_job_log(raw) for raw in items) if item is not None]
+
+        fallback_items = [
+            entry
+            for entry in await self._get_all_redis_job_logs()
+            if int(entry.get("portal_user_id") or 0) == normalized_portal_user_id
+        ]
+        if limit is None:
+            return fallback_items
+        safe_limit = max(1, int(limit or 1))
+        safe_offset = max(0, int(offset or 0))
+        return fallback_items[safe_offset:safe_offset + safe_limit]
+
+    async def _count_redis_job_logs_by_portal_user(self, *, portal_user_id: int) -> int:
+        if self._redis_log_store is None:
+            return 0
+        normalized_portal_user_id = int(portal_user_id or 0)
+        if normalized_portal_user_id <= 0:
+            return 0
+        if await self._redis_log_store.job_log_portal_user_index_exists(portal_user_id=normalized_portal_user_id):
+            return await self._redis_log_store.count_job_logs_by_portal_user(portal_user_id=normalized_portal_user_id)
+        return sum(
+            1
+            for entry in await self._get_all_redis_job_logs()
+            if int(entry.get("portal_user_id") or 0) == normalized_portal_user_id
+        )
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> Optional[datetime]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
     async def list_portal_user_jobs(
         self,
         portal_user_id: int,
@@ -1152,6 +1669,46 @@ class Database:
         status: Optional[str] = None,
         project_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        if self._job_logs_use_redis():
+            safe_limit = max(1, min(int(limit), 200))
+            safe_offset = max(0, int(offset))
+            normalized_status = str(status or "").strip()
+            normalized_project_id = str(project_id or "").strip()
+            portal_key_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+            items: List[Dict[str, Any]] = []
+            for entry in await self._get_redis_job_logs_by_portal_user(
+                portal_user_id=portal_user_id,
+                limit=None,
+                offset=0,
+            ):
+                if normalized_status and str(entry.get("status") or "").strip() != normalized_status:
+                    continue
+                if normalized_project_id and str(entry.get("project_id") or "").strip() != normalized_project_id:
+                    continue
+                item = {
+                    "id": int(entry.get("id") or 0),
+                    "portal_user_id": int(entry.get("portal_user_id") or 0),
+                    "session_id": entry.get("session_id"),
+                    "project_id": entry.get("project_id"),
+                    "action": entry.get("action"),
+                    "status": entry.get("status"),
+                    "error_reason": entry.get("error_reason"),
+                    "duration_ms": entry.get("duration_ms"),
+                    "created_at": entry.get("created_at"),
+                    "source": "portal" if entry.get("log_scope") == "portal_user_jobs" else "api",
+                    "api_key_name": None,
+                    "api_key_prefix": None,
+                }
+                portal_api_key_id = int(entry.get("portal_api_key_id") or 0)
+                if portal_api_key_id > 0 and item["source"] == "api":
+                    if portal_api_key_id not in portal_key_cache:
+                        portal_key_cache[portal_api_key_id] = await self.get_portal_user_api_key(portal_api_key_id)
+                    portal_key = portal_key_cache.get(portal_api_key_id) or {}
+                    item["api_key_name"] = portal_key.get("name")
+                    item["api_key_prefix"] = portal_key.get("key_prefix")
+                items.append(item)
+            return items[safe_offset:safe_offset + safe_limit]
+
         safe_limit = max(1, min(int(limit), 200))
         safe_offset = max(0, int(offset))
         filters: List[str] = []
@@ -1198,6 +1755,24 @@ class Database:
         status: Optional[str] = None,
         project_id: Optional[str] = None,
     ) -> int:
+        if self._job_logs_use_redis():
+            normalized_status = str(status or "").strip()
+            normalized_project_id = str(project_id or "").strip()
+            if not normalized_status and not normalized_project_id:
+                return await self._count_redis_job_logs_by_portal_user(portal_user_id=portal_user_id)
+            total = 0
+            for entry in await self._get_redis_job_logs_by_portal_user(
+                portal_user_id=portal_user_id,
+                limit=None,
+                offset=0,
+            ):
+                if normalized_status and str(entry.get("status") or "").strip() != normalized_status:
+                    continue
+                if normalized_project_id and str(entry.get("project_id") or "").strip() != normalized_project_id:
+                    continue
+                total += 1
+            return total
+
         filters: List[str] = []
         params: List[Any] = [portal_user_id, portal_user_id]
 
@@ -1243,19 +1818,11 @@ class Database:
             "timeout_logs_created": 0,
         }
 
-        terminal_statuses = (
-            "finish:success",
-            "finish:failed",
-            "finish:cancelled",
-            "finish:timeout",
-            "error_reported",
-        )
-
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
 
             portal_cursor = await db.execute(
-                f"""
+                """
                 SELECT
                     e.session_id,
                     e.owner_id AS portal_user_id,
@@ -1341,27 +1908,21 @@ class Database:
                   )
                   AND NOT EXISTS (
                     SELECT 1
-                    FROM portal_user_jobs pj
-                    WHERE pj.portal_user_id = e.owner_id
-                      AND pj.session_id = e.session_id
-                      AND pj.status IN ({",".join(["?"] * len(terminal_statuses))})
-                  )
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM captcha_jobs cj
-                    WHERE cj.portal_user_id = e.owner_id
-                      AND cj.session_id = e.session_id
-                      AND cj.status IN ({",".join(["?"] * len(terminal_statuses))})
+                    FROM session_quota_events c
+                    WHERE c.session_id = e.session_id
+                      AND c.owner_type = e.owner_type
+                      AND c.owner_id = e.owner_id
+                      AND c.event_type = 'complete'
                   )
                 ORDER BY e.id ASC
                 LIMIT ?
                 """,
-                (safe_stale, *terminal_statuses, *terminal_statuses, safe_limit),
+                (safe_stale, safe_limit),
             )
             portal_candidates = [dict(row) for row in await portal_cursor.fetchall()]
 
             service_cursor = await db.execute(
-                f"""
+                """
                 SELECT
                     e.session_id,
                     e.owner_id AS api_key_id,
@@ -1395,15 +1956,16 @@ class Database:
                   )
                   AND NOT EXISTS (
                     SELECT 1
-                    FROM captcha_jobs cj
-                    WHERE cj.api_key_id = e.owner_id
-                      AND cj.session_id = e.session_id
-                      AND cj.status IN ({",".join(["?"] * len(terminal_statuses))})
+                    FROM session_quota_events c
+                    WHERE c.session_id = e.session_id
+                      AND c.owner_type = e.owner_type
+                      AND c.owner_id = e.owner_id
+                      AND c.event_type = 'complete'
                   )
                 ORDER BY e.id ASC
                 LIMIT ?
                 """,
-                (safe_stale, *terminal_statuses, safe_limit),
+                (safe_stale, safe_limit),
             )
             service_candidates = [dict(row) for row in await service_cursor.fetchall()]
 
@@ -1469,6 +2031,94 @@ class Database:
         user = await self.get_portal_user(user_id)
         if not user:
             return None
+
+        if self._job_logs_use_redis():
+            now = datetime.now(UTC).replace(tzinfo=None)
+            request_statuses = {"success", "success_master_dispatch", "failed"}
+            failed_statuses = {"failed", "error_reported", "finish:failed", "finish:cancelled", "finish:timeout"}
+            items = await self._get_redis_job_logs_by_portal_user(portal_user_id=user_id, limit=None, offset=0)
+            request_total = 0
+            solve_success_total = 0
+            solve_failed_total = 0
+            finish_total = 0
+            error_total = 0
+            recent_24h_total = 0
+            recent_7d_total = 0
+            duration_values: List[int] = []
+            last_request_at: Optional[str] = None
+            latest_session_id: Optional[str] = None
+            project_totals: Dict[str, int] = {}
+
+            for entry in items:
+                status_name = str(entry.get("status") or "").strip()
+                created_at = str(entry.get("created_at") or "").strip() or None
+                created_dt = self._parse_timestamp(created_at)
+                if status_name in request_statuses:
+                    request_total += 1
+                    project_id_value = str(entry.get("project_id") or "").strip()
+                    if project_id_value:
+                        project_totals[project_id_value] = project_totals.get(project_id_value, 0) + 1
+                if status_name == "finish:success":
+                    solve_success_total += 1
+                if status_name in failed_statuses:
+                    solve_failed_total += 1
+                if status_name.startswith("finish:"):
+                    finish_total += 1
+                if status_name == "error_reported":
+                    error_total += 1
+                if created_dt is not None:
+                    age_seconds = (now - created_dt).total_seconds()
+                    if age_seconds <= 24 * 3600:
+                        recent_24h_total += 1
+                    if age_seconds <= 7 * 24 * 3600:
+                        recent_7d_total += 1
+                if entry.get("duration_ms") is not None:
+                    duration_values.append(int(entry["duration_ms"]))
+                if created_at and (last_request_at is None or created_at > last_request_at):
+                    last_request_at = created_at
+                session_id_value = str(entry.get("session_id") or "").strip()
+                if session_id_value and latest_session_id is None:
+                    latest_session_id = session_id_value
+
+            top_projects = [
+                {"project_id": project_id, "total": total}
+                for project_id, total in sorted(project_totals.items(), key=lambda item: (-item[1], item[0]))[:5]
+            ]
+
+            async with self._connect() as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    """
+                    SELECT checkin_date, quota_granted, created_at
+                    FROM portal_user_checkins
+                    WHERE portal_user_id = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                latest_checkin = await cursor.fetchone()
+
+            solve_total = solve_success_total + solve_failed_total
+            return {
+                "user": user,
+                "usage": {
+                    "request_total": request_total,
+                    "solve_success_total": solve_success_total,
+                    "solve_failed_total": solve_failed_total,
+                    "solve_total": solve_total,
+                    "finish_total": finish_total,
+                    "error_total": error_total,
+                    "recent_24h_total": recent_24h_total,
+                    "recent_7d_total": recent_7d_total,
+                    "avg_duration_ms": int(sum(duration_values) / len(duration_values)) if duration_values else None,
+                    "last_request_at": last_request_at,
+                    "latest_session_id": latest_session_id,
+                    "success_rate": round((solve_success_total / solve_total) * 100, 2) if solve_total > 0 else 0.0,
+                    "top_projects": top_projects,
+                    "latest_checkin": dict(latest_checkin) if latest_checkin else None,
+                },
+            }
 
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -2075,6 +2725,46 @@ class Database:
         status: Optional[str] = None,
         project_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        if self._job_logs_use_redis():
+            safe_limit = max(1, min(int(limit), 200))
+            safe_offset = max(0, int(offset))
+            normalized_status = str(status or "").strip()
+            normalized_project_id = str(project_id or "").strip()
+            portal_key_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+            items: List[Dict[str, Any]] = []
+            for entry in await self._get_redis_job_logs_by_portal_user(
+                portal_user_id=portal_user_id,
+                limit=None,
+                offset=0,
+            ):
+                if entry.get("log_scope") != "captcha_jobs":
+                    continue
+                if int(entry.get("portal_user_id") or 0) != int(portal_user_id):
+                    continue
+                if normalized_status and str(entry.get("status") or "").strip() != normalized_status:
+                    continue
+                if normalized_project_id and str(entry.get("project_id") or "").strip() != normalized_project_id:
+                    continue
+                portal_api_key_id = int(entry.get("portal_api_key_id") or 0)
+                if portal_api_key_id > 0 and portal_api_key_id not in portal_key_cache:
+                    portal_key_cache[portal_api_key_id] = await self.get_portal_user_api_key(portal_api_key_id)
+                portal_key = portal_key_cache.get(portal_api_key_id) or {}
+                items.append(
+                    {
+                        "id": int(entry.get("id") or 0),
+                        "session_id": entry.get("session_id"),
+                        "project_id": entry.get("project_id"),
+                        "action": entry.get("action"),
+                        "status": entry.get("status"),
+                        "error_reason": entry.get("error_reason"),
+                        "duration_ms": entry.get("duration_ms"),
+                        "created_at": entry.get("created_at"),
+                        "api_key_name": portal_key.get("name"),
+                        "api_key_prefix": portal_key.get("key_prefix"),
+                    }
+                )
+            return items[safe_offset:safe_offset + safe_limit]
+
         safe_limit = max(1, min(int(limit), 200))
         safe_offset = max(0, int(offset))
         conditions = ["j.portal_user_id = ?"]
@@ -2355,6 +3045,22 @@ class Database:
         portal_user_id: Optional[int] = None,
         portal_api_key_id: Optional[int] = None,
     ):
+        if self._job_logs_use_redis():
+            await self._redis_log_store.append_job_log(
+                {
+                    "log_scope": "captcha_jobs",
+                    "session_id": session_id,
+                    "api_key_id": api_key_id,
+                    "project_id": project_id,
+                    "action": action,
+                    "status": status,
+                    "error_reason": error_reason,
+                    "duration_ms": duration_ms,
+                    "portal_user_id": portal_user_id,
+                    "portal_api_key_id": portal_api_key_id,
+                }
+            )
+            return
         async with self._write_connect() as db:
             await self._create_job_log_in_tx(
                 db,
@@ -2406,22 +3112,55 @@ class Database:
                             reason=normalized_refund_reason,
                         )
 
-                await self._create_job_log_in_tx(
-                    db,
-                    session_id=normalized_session_id,
-                    api_key_id=api_key_id,
-                    project_id=project_id,
-                    action=action,
-                    status=status,
-                    error_reason=error_reason,
-                    duration_ms=None,
-                    portal_user_id=portal_user_id,
-                    portal_api_key_id=portal_api_key_id,
-                )
+                if int(portal_user_id or 0) > 0:
+                    await self._mark_session_complete_in_tx(
+                        db,
+                        session_id=normalized_session_id,
+                        owner_type="portal_user",
+                        owner_id=int(portal_user_id),
+                        note=status,
+                    )
+                elif int(api_key_id or 0) > 0:
+                    await self._mark_session_complete_in_tx(
+                        db,
+                        session_id=normalized_session_id,
+                        owner_type="service_api_key",
+                        owner_id=int(api_key_id),
+                        note=status,
+                    )
+
+                if not self._job_logs_use_redis():
+                    await self._create_job_log_in_tx(
+                        db,
+                        session_id=normalized_session_id,
+                        api_key_id=api_key_id,
+                        project_id=project_id,
+                        action=action,
+                        status=status,
+                        error_reason=error_reason,
+                        duration_ms=None,
+                        portal_user_id=portal_user_id,
+                        portal_api_key_id=portal_api_key_id,
+                    )
                 await db.commit()
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
+        if self._job_logs_use_redis():
+            await self._redis_log_store.append_job_log(
+                {
+                    "log_scope": "captcha_jobs",
+                    "session_id": normalized_session_id,
+                    "api_key_id": api_key_id,
+                    "project_id": project_id,
+                    "action": action,
+                    "status": status,
+                    "error_reason": error_reason,
+                    "duration_ms": None,
+                    "portal_user_id": portal_user_id,
+                    "portal_api_key_id": portal_api_key_id,
+                }
+            )
 
     async def finalize_portal_user_session(
         self,
@@ -2448,22 +3187,76 @@ class Database:
                         reason=normalized_refund_reason,
                     )
 
-                await self._create_portal_user_job_log_in_tx(
+                await self._mark_session_complete_in_tx(
                     db,
-                    portal_user_id=int(portal_user_id),
                     session_id=normalized_session_id,
-                    project_id=project_id,
-                    action=action,
-                    status=status,
-                    error_reason=error_reason,
-                    duration_ms=None,
+                    owner_type="portal_user",
+                    owner_id=int(portal_user_id),
+                    note=status,
                 )
+
+                if not self._job_logs_use_redis():
+                    await self._create_portal_user_job_log_in_tx(
+                        db,
+                        portal_user_id=int(portal_user_id),
+                        session_id=normalized_session_id,
+                        project_id=project_id,
+                        action=action,
+                        status=status,
+                        error_reason=error_reason,
+                        duration_ms=None,
+                    )
                 await db.commit()
             except Exception:
                 await db.execute("ROLLBACK")
                 raise
+        if self._job_logs_use_redis():
+            await self._redis_log_store.append_job_log(
+                {
+                    "log_scope": "portal_user_jobs",
+                    "portal_user_id": int(portal_user_id),
+                    "session_id": normalized_session_id,
+                    "project_id": project_id,
+                    "action": action,
+                    "status": status,
+                    "error_reason": error_reason,
+                    "duration_ms": None,
+                }
+            )
 
     async def list_job_logs(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        if self._job_logs_use_redis():
+            safe_limit = max(1, min(int(limit), 500))
+            safe_offset = max(0, int(offset))
+            items = await self._get_redis_job_logs(limit=safe_limit, offset=safe_offset)
+            service_key_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+            result: List[Dict[str, Any]] = []
+            for entry in items:
+                item = {
+                    "id": int(entry.get("id") or 0),
+                    "session_id": entry.get("session_id"),
+                    "api_key_id": entry.get("api_key_id"),
+                    "api_key_name": None,
+                    "key_prefix": None,
+                    "project_id": entry.get("project_id"),
+                    "action": entry.get("action"),
+                    "status": entry.get("status"),
+                    "error_reason": entry.get("error_reason"),
+                    "duration_ms": entry.get("duration_ms"),
+                    "created_at": entry.get("created_at"),
+                    "portal_user_id": entry.get("portal_user_id"),
+                    "portal_api_key_id": entry.get("portal_api_key_id"),
+                }
+                api_key_id = int(entry.get("api_key_id") or 0)
+                if api_key_id > 0:
+                    if api_key_id not in service_key_cache:
+                        service_key_cache[api_key_id] = await self.get_api_key(api_key_id)
+                    api_key = service_key_cache.get(api_key_id) or {}
+                    item["api_key_name"] = api_key.get("name")
+                    item["key_prefix"] = api_key.get("key_prefix")
+                result.append(item)
+            return result
+
         safe_limit = max(1, min(int(limit), 500))
         safe_offset = max(0, int(offset))
         async with self._connect() as db:
@@ -2514,6 +3307,8 @@ class Database:
             return [dict(row) for row in rows]
 
     async def count_job_logs(self) -> int:
+        if self._job_logs_use_redis():
+            return await self._redis_log_store.count_job_logs()
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
@@ -2527,6 +3322,19 @@ class Database:
             return int(row["total"] or 0) if row else 0
 
     async def clear_job_logs(self) -> Dict[str, int]:
+        if self._job_logs_use_redis():
+            redis_result = await self._redis_log_store.clear_job_logs_with_breakdown()
+            result = {
+                "captcha_jobs": int(redis_result.get("captcha_jobs") or 0),
+                "portal_user_jobs": int(redis_result.get("portal_user_jobs") or 0),
+            }
+            async with self._write_connect() as db:
+                captcha_cursor = await db.execute("DELETE FROM captcha_jobs")
+                portal_cursor = await db.execute("DELETE FROM portal_user_jobs")
+                await db.commit()
+            result["captcha_jobs"] += int(captcha_cursor.rowcount or 0)
+            result["portal_user_jobs"] += int(portal_cursor.rowcount or 0)
+            return result
         async with self._write_connect() as db:
             captcha_cursor = await db.execute("DELETE FROM captcha_jobs")
             portal_cursor = await db.execute("DELETE FROM portal_user_jobs")
@@ -2545,6 +3353,39 @@ class Database:
         status: Optional[str] = None,
         project_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        if self._job_logs_use_redis():
+            safe_limit = max(1, min(int(limit), 200))
+            safe_offset = max(0, int(offset))
+            normalized_status = str(status or "").strip()
+            normalized_project = str(project_id or "").strip()
+            api_key = await self.get_api_key(api_key_id)
+            items: List[Dict[str, Any]] = []
+            for entry in await self._get_redis_job_logs_by_api_key(
+                api_key_id=api_key_id,
+                limit=None,
+                offset=0,
+            ):
+                if normalized_status and str(entry.get("status") or "").strip() != normalized_status:
+                    continue
+                if normalized_project and str(entry.get("project_id") or "").strip() != normalized_project:
+                    continue
+                items.append(
+                    {
+                        "id": int(entry.get("id") or 0),
+                        "session_id": entry.get("session_id"),
+                        "api_key_id": api_key_id,
+                        "api_key_name": (api_key or {}).get("name"),
+                        "key_prefix": (api_key or {}).get("key_prefix"),
+                        "project_id": entry.get("project_id"),
+                        "action": entry.get("action"),
+                        "status": entry.get("status"),
+                        "error_reason": entry.get("error_reason"),
+                        "duration_ms": entry.get("duration_ms"),
+                        "created_at": entry.get("created_at"),
+                    }
+                )
+            return items[safe_offset:safe_offset + safe_limit]
+
         safe_limit = max(1, min(int(limit), 200))
         safe_offset = max(0, int(offset))
 
@@ -2586,6 +3427,106 @@ class Database:
         api_key = await self.get_api_key(api_key_id)
         if not api_key:
             return None
+
+        if self._job_logs_use_redis():
+            now = datetime.now(UTC).replace(tzinfo=None)
+            request_statuses = {"success", "success_master_dispatch", "failed"}
+            failed_statuses = {"failed", "error_reported", "finish:failed", "finish:cancelled", "finish:timeout"}
+            items = await self._get_redis_job_logs_by_api_key(api_key_id=api_key_id, limit=None, offset=0)
+            request_total = 0
+            solve_success_total = 0
+            solve_failed_total = 0
+            finish_total = 0
+            error_total = 0
+            recent_24h_total = 0
+            recent_7d_total = 0
+            duration_values: List[int] = []
+            last_request_at: Optional[str] = None
+            latest_session_id: Optional[str] = None
+            project_summary: Dict[str, Dict[str, Any]] = {}
+            action_totals: Dict[str, int] = {}
+
+            for entry in items:
+                status_name = str(entry.get("status") or "").strip()
+                created_at = str(entry.get("created_at") or "").strip() or None
+                created_dt = self._parse_timestamp(created_at)
+                if status_name in request_statuses:
+                    request_total += 1
+                    project_id_value = str(entry.get("project_id") or "").strip()
+                    if project_id_value:
+                        project_item = project_summary.setdefault(
+                            project_id_value,
+                            {
+                                "project_id": project_id_value,
+                                "total": 0,
+                                "solve_success": 0,
+                                "solve_failed": 0,
+                                "last_used_at": None,
+                            },
+                        )
+                        project_item["total"] += 1
+                        if status_name == "finish:success":
+                            project_item["solve_success"] += 1
+                        if status_name in failed_statuses:
+                            project_item["solve_failed"] += 1
+                        if created_at and (
+                            project_item["last_used_at"] is None or created_at > project_item["last_used_at"]
+                        ):
+                            project_item["last_used_at"] = created_at
+                    action_name = str(entry.get("action") or "").strip()
+                    if action_name:
+                        action_totals[action_name] = action_totals.get(action_name, 0) + 1
+                if status_name == "finish:success":
+                    solve_success_total += 1
+                if status_name in failed_statuses:
+                    solve_failed_total += 1
+                if status_name.startswith("finish:"):
+                    finish_total += 1
+                if status_name == "error_reported":
+                    error_total += 1
+                if created_dt is not None:
+                    age_seconds = (now - created_dt).total_seconds()
+                    if age_seconds <= 24 * 3600:
+                        recent_24h_total += 1
+                    if age_seconds <= 7 * 24 * 3600:
+                        recent_7d_total += 1
+                if entry.get("duration_ms") is not None:
+                    duration_values.append(int(entry["duration_ms"]))
+                if created_at and (last_request_at is None or created_at > last_request_at):
+                    last_request_at = created_at
+                session_id_value = str(entry.get("session_id") or "").strip()
+                if session_id_value and latest_session_id is None:
+                    latest_session_id = session_id_value
+
+            solve_total = solve_success_total + solve_failed_total
+            top_projects = sorted(
+                project_summary.values(),
+                key=lambda item: (-int(item["total"]), str(item["project_id"])),
+            )[:5]
+            top_actions = [
+                {"action": action_name, "total": total}
+                for action_name, total in sorted(action_totals.items(), key=lambda item: (-item[1], item[0]))[:5]
+            ]
+
+            return {
+                "api_key": api_key,
+                "usage": {
+                    "request_total": request_total,
+                    "solve_success_total": solve_success_total,
+                    "solve_failed_total": solve_failed_total,
+                    "solve_total": solve_total,
+                    "finish_total": finish_total,
+                    "error_total": error_total,
+                    "recent_24h_total": recent_24h_total,
+                    "recent_7d_total": recent_7d_total,
+                    "avg_duration_ms": int(sum(duration_values) / len(duration_values)) if duration_values else None,
+                    "last_request_at": last_request_at,
+                    "latest_session_id": latest_session_id,
+                    "success_rate": round((solve_success_total / solve_total) * 100, 2) if solve_total > 0 else 0.0,
+                    "top_projects": top_projects,
+                    "top_actions": top_actions,
+                },
+            }
 
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -2683,6 +3624,90 @@ class Database:
         }
 
     async def get_service_stats(self) -> Dict[str, Any]:
+        if self._job_logs_use_redis():
+            request_statuses = {"success", "success_master_dispatch", "failed"}
+            failed_statuses = {"failed", "error_reported", "finish:failed", "finish:cancelled", "finish:timeout"}
+            job_items = await self._get_redis_job_logs_by_scope(scope="captcha_jobs", limit=None, offset=0)
+            summary = {
+                "total": 0,
+                "success": 0,
+                "failed": 0,
+                "finish_total": 0,
+                "error_report_total": 0,
+            }
+            for entry in job_items:
+                status_name = str(entry.get("status") or "").strip()
+                if status_name in request_statuses:
+                    summary["total"] += 1
+                if status_name == "finish:success":
+                    summary["success"] += 1
+                if status_name in failed_statuses:
+                    summary["failed"] += 1
+                if status_name.startswith("finish:"):
+                    summary["finish_total"] += 1
+                if status_name == "error_reported":
+                    summary["error_report_total"] += 1
+
+            async with self._connect() as db:
+                db.row_factory = aiosqlite.Row
+
+                cursor = await db.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS key_count,
+                        SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS key_enabled_count
+                    FROM service_api_keys
+                    """
+                )
+                key_summary = await cursor.fetchone()
+
+                cursor = await db.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS node_count,
+                        SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS node_enabled_count
+                    FROM cluster_nodes
+                    """
+                )
+                node_summary = await cursor.fetchone()
+
+                cursor = await db.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS portal_user_total,
+                        SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS portal_user_enabled_total
+                    FROM portal_users
+                    """
+                )
+                portal_user_summary = await cursor.fetchone()
+
+                cursor = await db.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS portal_cdk_total,
+                        SUM(CASE WHEN redeemed_user_id IS NULL THEN 1 ELSE 0 END) AS portal_cdk_unused_total
+                    FROM portal_cdks
+                    """
+                )
+                portal_cdk_summary = await cursor.fetchone()
+
+            return {
+                "jobs_total": int(summary["total"] or 0),
+                "jobs_success": int(summary["success"] or 0),
+                "jobs_failed": int(summary["failed"] or 0),
+                "jobs_solve_total": int(summary["success"] or 0) + int(summary["failed"] or 0),
+                "jobs_finish_total": int(summary["finish_total"] or 0),
+                "jobs_error_report_total": int(summary["error_report_total"] or 0),
+                "api_key_total": int(key_summary["key_count"] or 0),
+                "api_key_enabled_total": int(key_summary["key_enabled_count"] or 0),
+                "cluster_node_total": int(node_summary["node_count"] or 0),
+                "cluster_node_enabled_total": int(node_summary["node_enabled_count"] or 0),
+                "portal_user_total": int(portal_user_summary["portal_user_total"] or 0),
+                "portal_user_enabled_total": int(portal_user_summary["portal_user_enabled_total"] or 0),
+                "portal_cdk_total": int(portal_cdk_summary["portal_cdk_total"] or 0),
+                "portal_cdk_unused_total": int(portal_cdk_summary["portal_cdk_unused_total"] or 0),
+            }
+
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
 
@@ -3008,6 +4033,9 @@ class Database:
         return await self.get_cluster_node(node_id)
 
     async def delete_cluster_node(self, node_id: int) -> bool:
+        if self._cluster_logs_use_redis():
+            await self._redis_log_store.clear_cluster_heartbeats(node_id=node_id)
+            await self._redis_log_store.clear_cluster_errors(node_id=node_id)
         async with self._connect() as db:
             await db.execute("DELETE FROM cluster_node_heartbeats WHERE node_id = ?", (node_id,))
             await db.execute("DELETE FROM cluster_node_errors WHERE node_id = ?", (node_id,))
@@ -3027,14 +4055,24 @@ class Database:
                 """,
                 (error_message[:500], node_id),
             )
-            await db.execute(
-                """
-                INSERT INTO cluster_node_errors (node_id, error_type, error_message)
-                VALUES (?, ?, ?)
-                """,
-                (node_id, (error_type or "runtime")[:60], (error_message or "")[:500]),
-            )
+            if not self._cluster_logs_use_redis():
+                await db.execute(
+                    """
+                    INSERT INTO cluster_node_errors (node_id, error_type, error_message)
+                    VALUES (?, ?, ?)
+                    """,
+                    (node_id, (error_type or "runtime")[:60], (error_message or "")[:500]),
+                )
             await db.commit()
+        if self._cluster_logs_use_redis():
+            await self._redis_log_store.append_cluster_error(
+                int(node_id),
+                {
+                    "node_id": int(node_id),
+                    "error_type": (error_type or "runtime")[:60],
+                    "error_message": (error_message or "")[:500],
+                },
+            )
 
     async def adjust_cluster_node_sessions(
         self,
@@ -3074,6 +4112,18 @@ class Database:
         reason: Optional[str] = None,
     ):
         safe_payload = payload if isinstance(payload, dict) else {}
+        if self._cluster_logs_use_redis():
+            await self._redis_log_store.append_cluster_heartbeat(
+                int(node_id),
+                {
+                    "node_id": int(node_id),
+                    "event_type": (event_type or "heartbeat")[:32],
+                    "healthy": bool(healthy),
+                    "reason": (reason or "")[:300] or None,
+                    "payload": safe_payload,
+                },
+            )
+            return
         async with self._write_connect() as db:
             await db.execute(
                 """
@@ -3091,6 +4141,16 @@ class Database:
             await db.commit()
 
     async def list_cluster_node_heartbeats(self, node_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+        if self._cluster_logs_use_redis():
+            safe_limit = min(max(1, int(limit or 20)), 100)
+            items = await self._redis_log_store.list_cluster_heartbeats(node_id=node_id, limit=safe_limit)
+            for item in items:
+                item["id"] = int(item.get("id") or 0)
+                item["node_id"] = int(item.get("node_id") or node_id)
+                item["healthy"] = bool(item.get("healthy"))
+                if not isinstance(item.get("payload"), dict):
+                    item["payload"] = {}
+            return items
         safe_limit = min(max(1, int(limit or 20)), 100)
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -3124,6 +4184,13 @@ class Database:
         return items
 
     async def list_cluster_node_errors(self, node_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+        if self._cluster_logs_use_redis():
+            safe_limit = min(max(1, int(limit or 20)), 100)
+            items = await self._redis_log_store.list_cluster_errors(node_id=node_id, limit=safe_limit)
+            for item in items:
+                item["id"] = int(item.get("id") or 0)
+                item["node_id"] = int(item.get("node_id") or node_id)
+            return items
         safe_limit = min(max(1, int(limit or 20)), 100)
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -3149,6 +4216,28 @@ class Database:
     ) -> Dict[str, int]:
         if not clear_heartbeats and not clear_errors:
             return {"heartbeats": 0, "errors": 0}
+
+        if self._cluster_logs_use_redis():
+            node = await self.get_cluster_node(node_id)
+            if not node:
+                raise ValueError("节点不存在")
+            result = {"heartbeats": 0, "errors": 0}
+            if clear_heartbeats:
+                result["heartbeats"] = await self._redis_log_store.clear_cluster_heartbeats(node_id=node_id)
+            if clear_errors:
+                result["errors"] = await self._redis_log_store.clear_cluster_errors(node_id=node_id)
+                async with self._write_connect() as db:
+                    await db.execute(
+                        """
+                        UPDATE cluster_nodes
+                        SET last_error = NULL,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (node_id,),
+                    )
+                    await db.commit()
+            return result
 
         async with self._write_connect() as db:
             db.row_factory = aiosqlite.Row

@@ -25,6 +25,12 @@ node_name = "standalone-node"
 
 [log]
 level = "INFO"
+storage_backend = "sqlite"  # sqlite | redis
+redis_url = ""
+redis_key_prefix = "fcs"
+redis_max_entries = 20000
+startup_clear_on_boot = true
+auto_clear_interval_minutes = 0
 
 [cluster]
 role = "standalone"
