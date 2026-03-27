@@ -166,7 +166,7 @@ class Config:
                 "browser_recaptcha_settle_seconds": 3,
                 "browser_score_test_warmup_seconds": 12,
                 "browser_idle_ttl_seconds": 600,
-                "browser_solve_max_retries": 0,
+                "browser_solve_max_retries": 1,
                 "flow_timeout": 300,
                 "upsample_timeout": 300,
                 "session_ttl_seconds": 1200,
