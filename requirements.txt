@@ -6,3 +6,4 @@ curl-cffi==0.14.0
 tomli==2.2.1
 playwright>=1.40.0
 python-multipart==0.0.20
+redis==6.4.0

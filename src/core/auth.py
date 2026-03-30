@@ -31,12 +31,15 @@ def _extract_bearer(authorization: Optional[str]) -> str:
     return token
 
 
-async def verify_service_api_key(authorization: Optional[str] = Header(default=None)) -> dict:
+async def resolve_service_api_key_token(raw_key: str, *, allow_internal: bool = True) -> dict:
     if _db is None:
         raise HTTPException(status_code=500, detail="数据库未初始化")
 
-    raw_key = _extract_bearer(authorization)
-    if config.cluster_role == "subnode" and config.node_api_key and secrets.compare_digest(raw_key, config.node_api_key):
+    normalized_key = str(raw_key or "").strip()
+    if not normalized_key:
+        raise HTTPException(status_code=401, detail="API Key 不能为空")
+
+    if allow_internal and config.cluster_role == "subnode" and config.node_api_key and secrets.compare_digest(normalized_key, config.node_api_key):
         return {
             "id": -1,
             "name": "cluster_subnode_internal",
@@ -46,13 +49,13 @@ async def verify_service_api_key(authorization: Optional[str] = Header(default=N
             "is_internal": True,
         }
 
-    api_key = await _db.resolve_service_api_key(raw_key)
+    api_key = await _db.resolve_service_api_key(normalized_key)
     if api_key:
         if not bool(api_key["enabled"]):
             raise HTTPException(status_code=403, detail="API Key ???")
         return api_key
 
-    portal_api_key = await _db.resolve_portal_user_api_key(raw_key)
+    portal_api_key = await _db.resolve_portal_user_api_key(normalized_key)
     if not portal_api_key:
         raise HTTPException(status_code=401, detail="API Key ??")
     if not bool(portal_api_key.get("enabled", True)):
@@ -68,6 +71,10 @@ async def verify_service_api_key(authorization: Optional[str] = Header(default=N
     portal_api_key["portal_api_key_id"] = int(portal_api_key.get("id") or 0)
     portal_api_key["owner_type"] = "portal_user"
     return portal_api_key
+
+
+async def verify_service_api_key(authorization: Optional[str] = Header(default=None)) -> dict:
+    return await resolve_service_api_key_token(_extract_bearer(authorization), allow_internal=True)
 
 
 def issue_admin_token() -> str:

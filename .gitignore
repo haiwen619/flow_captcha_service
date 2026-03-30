@@ -4,11 +4,14 @@
 .venv/
 venv/
 .env
+.env.*.local
 config/setting.toml
 data/*.db
 data/*.db-*
+data/**/*.db
+data/**/*.db-*
 playwright-report/
 
 data/setting.toml
-/.vs
-/tmp/browser_pids
+data/*/setting.toml
+deploy/*.env.local

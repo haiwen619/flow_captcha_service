@@ -10,7 +10,7 @@ from ..core.config import config
 from ..core.database import Database
 from ..core.diagnostics import diag_label
 from ..core.logger import debug_logger
-from ..core.models import CustomScoreRequest, ErrorRequest, FinishRequest, SolveRequest, SolveResponse
+from ..core.models import CustomScoreRequest, CustomTokenRequest, ErrorRequest, FinishRequest, PrefillRequest, SolveRequest, SolveResponse
 from ..services.captcha_runtime import CaptchaRuntime
 from ..services.cluster_manager import ClusterManager
 
@@ -72,6 +72,7 @@ async def solve_captcha(
         raise HTTPException(status_code=500, detail="服务未初始化")
 
     service_api_key_id, portal_user_id, portal_api_key_id = _resolve_service_request_owner(api_key)
+    should_persist_job_log = not bool(api_key.get("is_internal"))
     if portal_user_id:
         available, message = await _db.ensure_portal_user_available(portal_user_id)
     else:
@@ -125,35 +126,63 @@ async def solve_captcha(
             raise HTTPException(status_code=403, detail=consume_message)
 
         elapsed = int((time.perf_counter() - started) * 1000)
-        await _safe_create_job_log(
-            session_id=result.get("session_id") if result else None,
-            api_key_id=service_api_key_id,
-            project_id=request.project_id,
-            action=request.action,
-            status=log_status,
-            error_reason=None,
-            duration_ms=elapsed,
-            portal_user_id=portal_user_id,
-            portal_api_key_id=portal_api_key_id,
-        )
+        if should_persist_job_log:
+            await _safe_create_job_log(
+                session_id=result.get("session_id") if result else None,
+                api_key_id=service_api_key_id,
+                project_id=request.project_id,
+                action=request.action,
+                status=log_status,
+                error_reason=None,
+                duration_ms=elapsed,
+                portal_user_id=portal_user_id,
+                portal_api_key_id=portal_api_key_id,
+            )
 
         return SolveResponse(**(result or {}))
     except HTTPException:
         raise
     except Exception as e:
         elapsed = int((time.perf_counter() - started) * 1000)
-        await _safe_create_job_log(
-            session_id=result.get("session_id") if result else None,
-            api_key_id=service_api_key_id,
+        if should_persist_job_log:
+            await _safe_create_job_log(
+                session_id=result.get("session_id") if result else None,
+                api_key_id=service_api_key_id,
+                project_id=request.project_id,
+                action=request.action,
+                status="failed",
+                error_reason=str(e),
+                duration_ms=elapsed,
+                portal_user_id=portal_user_id,
+                portal_api_key_id=portal_api_key_id,
+            )
+        raise HTTPException(status_code=500, detail=f"打码失败: {e}")
+
+
+@router.post("/prefill")
+async def prefill_solve_pool(
+    request: PrefillRequest,
+    api_key: dict = Depends(verify_service_api_key),
+):
+    if _runtime is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+
+    if config.cluster_role == "master":
+        raise HTTPException(status_code=400, detail="master 角色不支持本地 prefill")
+
+    try:
+        payload = await _runtime.prime_solve_pool(
             project_id=request.project_id,
             action=request.action,
-            status="failed",
-            error_reason=str(e),
-            duration_ms=elapsed,
-            portal_user_id=portal_user_id,
-            portal_api_key_id=portal_api_key_id,
+            token_id=request.token_id,
         )
-        raise HTTPException(status_code=500, detail=f"打码失败: {e}")
+        return {
+            "success": True,
+            "captcha_method": "remote_browser",
+            **payload,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"prefill 失败: {e}")
 
 
 @router.post("/sessions/{session_id}/finish")
@@ -166,6 +195,7 @@ async def finish_session(
         raise HTTPException(status_code=500, detail="服务未初始化")
 
     service_api_key_id, portal_user_id, portal_api_key_id = _resolve_service_request_owner(api_key)
+    should_persist_job_log = not bool(api_key.get("is_internal"))
     entry = None
     if config.cluster_role == "master" and ":" in session_id:
         if _cluster is None:
@@ -193,23 +223,24 @@ async def finish_session(
 
     normalized_status = str(request.status or "").strip().lower()
     refund_reason = f"finish:{normalized_status}" if normalized_status and normalized_status != "success" else None
-    try:
-        await _db.finalize_service_session(
-            session_id=session_id,
-            api_key_id=service_api_key_id,
-            project_id=entry.project_id if entry else None,
-            action=entry.action if entry else None,
-            status=f"finish:{request.status}",
-            error_reason=None,
-            portal_user_id=portal_user_id,
-            portal_api_key_id=portal_api_key_id,
-            refund_reason=refund_reason,
-        )
-    except Exception as e:
-        debug_logger.log_warning(
-            "[service_api] finalize finish failed "
-            f"status={request.status} session_id={session_id} {diag_label(e)}: {e}"
-        )
+    if should_persist_job_log:
+        try:
+            await _db.finalize_service_session(
+                session_id=session_id,
+                api_key_id=service_api_key_id,
+                project_id=entry.project_id if entry else None,
+                action=entry.action if entry else None,
+                status=f"finish:{request.status}",
+                error_reason=None,
+                portal_user_id=portal_user_id,
+                portal_api_key_id=portal_api_key_id,
+                refund_reason=refund_reason,
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                "[service_api] finalize finish failed "
+                f"status={request.status} session_id={session_id} {diag_label(e)}: {e}"
+            )
     return {"success": True, "message": message}
 
 
@@ -223,6 +254,7 @@ async def report_session_error(
         raise HTTPException(status_code=500, detail="服务未初始化")
 
     service_api_key_id, portal_user_id, portal_api_key_id = _resolve_service_request_owner(api_key)
+    should_persist_job_log = not bool(api_key.get("is_internal"))
     entry = None
     if config.cluster_role == "master" and ":" in session_id:
         if _cluster is None:
@@ -248,23 +280,24 @@ async def report_session_error(
         if not ok:
             raise HTTPException(status_code=404, detail=message)
 
-    try:
-        await _db.finalize_service_session(
-            session_id=session_id,
-            api_key_id=service_api_key_id,
-            project_id=entry.project_id if entry else None,
-            action=entry.action if entry else None,
-            status="error_reported",
-            error_reason=request.error_reason,
-            portal_user_id=portal_user_id,
-            portal_api_key_id=portal_api_key_id,
-            refund_reason=request.error_reason or "error_reported",
-        )
-    except Exception as e:
-        debug_logger.log_warning(
-            "[service_api] finalize error failed "
-            f"session_id={session_id} error_reason={request.error_reason} {diag_label(e)}: {e}"
-        )
+    if should_persist_job_log:
+        try:
+            await _db.finalize_service_session(
+                session_id=session_id,
+                api_key_id=service_api_key_id,
+                project_id=entry.project_id if entry else None,
+                action=entry.action if entry else None,
+                status="error_reported",
+                error_reason=request.error_reason,
+                portal_user_id=portal_user_id,
+                portal_api_key_id=portal_api_key_id,
+                refund_reason=request.error_reason or "error_reported",
+            )
+        except Exception as e:
+            debug_logger.log_warning(
+                "[service_api] finalize error failed "
+                f"session_id={session_id} error_reason={request.error_reason} {diag_label(e)}: {e}"
+            )
     return {"success": True, "message": message}
 
 
@@ -314,3 +347,73 @@ async def custom_score(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"custom-score 失败: {e}")
+
+
+@router.post("/custom-token")
+async def custom_token(
+    request: CustomTokenRequest,
+    api_key: dict = Depends(verify_service_api_key),
+):
+    if _db is None or _runtime is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+
+    service_api_key_id, portal_user_id, portal_api_key_id = _resolve_service_request_owner(api_key)
+    should_persist_job_log = not bool(api_key.get("is_internal"))
+    started = time.perf_counter()
+
+    try:
+        if config.cluster_role == "master":
+            if _cluster is None:
+                raise RuntimeError("cluster manager 未初始化")
+            payload = await _cluster.dispatch_custom_token(request.model_dump())
+            log_status = "success_master_dispatch"
+        else:
+            payload = await _runtime.custom_token(
+                website_url=request.website_url,
+                website_key=request.website_key,
+                action=request.action,
+                enterprise=request.enterprise,
+                captcha_type=request.captcha_type,
+                is_invisible=request.is_invisible,
+            )
+            log_status = "finish:success"
+
+        if should_persist_job_log:
+            elapsed = int((time.perf_counter() - started) * 1000)
+            await _safe_create_job_log(
+                session_id=None,
+                api_key_id=service_api_key_id,
+                project_id=request.website_url,
+                action=f"CUSTOM_TOKEN:{request.captcha_type}:{request.action}",
+                status=log_status,
+                error_reason=None,
+                duration_ms=elapsed,
+                portal_user_id=portal_user_id,
+                portal_api_key_id=portal_api_key_id,
+            )
+
+        return {
+            "success": True,
+            "captcha_method": "remote_browser",
+            "node_name": payload.get("node_name", config.node_name),
+            "token": payload.get("token"),
+            "fingerprint": payload.get("fingerprint"),
+            "browser_id": payload.get("browser_id"),
+            "message": payload.get("message", "ok"),
+            "raw": payload,
+        }
+    except Exception as e:
+        if should_persist_job_log:
+            elapsed = int((time.perf_counter() - started) * 1000)
+            await _safe_create_job_log(
+                session_id=None,
+                api_key_id=service_api_key_id,
+                project_id=request.website_url,
+                action=f"CUSTOM_TOKEN:{request.captcha_type}:{request.action}",
+                status="failed",
+                error_reason=str(e),
+                duration_ms=elapsed,
+                portal_user_id=portal_user_id,
+                portal_api_key_id=portal_api_key_id,
+            )
+        raise HTTPException(status_code=500, detail=f"custom-token 失败: {e}")

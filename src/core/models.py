@@ -43,6 +43,12 @@ class SolveResponse(BaseModel):
     expires_in_seconds: int = 1200
 
 
+class PrefillRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    action: str = "IMAGE_GENERATION"
+    token_id: Optional[int] = None
+
+
 class FinishRequest(BaseModel):
     status: str = "success"
 
@@ -57,6 +63,15 @@ class CustomScoreRequest(BaseModel):
     verify_url: str = "https://antcpt.com/score_detector/verify.php"
     action: str = "homepage"
     enterprise: bool = False
+
+
+class CustomTokenRequest(BaseModel):
+    website_url: str = Field(min_length=1)
+    website_key: str = Field(min_length=1)
+    action: str = "homepage"
+    enterprise: bool = False
+    captcha_type: str = "recaptcha_v3"
+    is_invisible: bool = True
 
 
 class LoginRequest(BaseModel):

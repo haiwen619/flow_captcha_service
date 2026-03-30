@@ -40,6 +40,60 @@ python main.py
 
 ---
 
+## 傻瓜式 Docker 快速开始
+
+第一次部署，建议只走脚本入口，不要先手动 `mkdir` / `cp` / `docker compose -f ...`。
+
+### PowerShell
+
+先跑单机：
+
+```powershell
+.\scripts\deploy.ps1 standalone
+```
+
+想本机验证最小集群：
+
+```powershell
+.\scripts\deploy.ps1 stack
+```
+
+单独部署子节点：
+
+```powershell
+.\scripts\deploy.ps1 subnode `
+  -MasterBaseUrl http://host.docker.internal:8060 `
+  -MasterClusterKey <你的主节点 key> `
+  -NodePublicBaseUrl http://host.docker.internal:8061
+```
+
+### Bash
+
+```bash
+bash ./scripts/deploy.sh standalone
+bash ./scripts/deploy.sh stack
+```
+
+### 脚本会自动处理什么
+
+- 创建 `data` / `data/master` / `data/subnode`
+- 不存在时自动复制 `config/setting_example.toml`
+- 为 `stack` / `subnode` 自动生成本地 env 文件
+- 执行对应的 `docker compose up -d --build`
+- 等待健康检查通过后再打印访问地址
+
+### 两条重要规则
+
+- 第一次建议先跑 `standalone`，跑通后再尝试 `stack`
+- 配置优先级始终是：环境变量 > `data/setting.toml` > 默认值
+
+另外需要注意：
+
+- `stack` 更适合本机演示集群，不等于跨机器生产部署
+- `subnode` 跨机器部署时，`node_public_base_url` 必须填主节点真正能访问到的地址，不能填 `127.0.0.1` / `localhost` / `0.0.0.0`
+
+---
+
 ## 项目介绍
 
 ### 这个项目解决什么问题
@@ -51,6 +105,7 @@ python main.py
 
 - 有头浏览器打码能力
 - `solve -> finish/error` 会话协议
+- `YesCaptcha` 兼容协议（`createTask / getTaskResult / getBalance`）
 - 浏览器槽位复用与空闲回收
 - `standalone / master / subnode` 三种部署角色
 - 用户门户、管理员后台、API Key、额度和日志
@@ -58,7 +113,7 @@ python main.py
 
 它不提供：
 
-- `yescaptcha`、`capsolver` 这类第三方平台接入
+- `capsolver` 等其它第三方平台协议
 - 子节点上的用户注册/登录首页
 
 ---
@@ -172,14 +227,14 @@ nodeId:childSessionId
 
 ### 目录准备
 
-首次部署建议先准备运行目录：
+如果你使用前面的 Docker 脚本入口，这一步会自动完成。
+
+只有在你准备走本地 Python 或手工命令时，才需要自己准备运行目录：
 
 ```bash
 mkdir -p data
 cp config/setting_example.toml data/setting.toml
 ```
-
-如果你使用 Windows PowerShell，可以按自己的习惯改成等价命令。
 
 ### 本地 Python 模式额外安装
 
@@ -234,6 +289,14 @@ python -m playwright install --with-deps chromium
 - `FCS_LOG_LEVEL`
 - `FCS_NODE_NAME`
 
+#### 日志存储（可选 Redis）
+
+- `FCS_LOG_STORAGE_BACKEND`
+- `FCS_LOG_REDIS_URL`
+- `FCS_LOG_REDIS_KEY_PREFIX`
+- `FCS_LOG_REDIS_MAX_ENTRIES`
+- `FCS_LOG_STARTUP_CLEAR_ON_BOOT`
+
 #### 浏览器与打码
 
 - `FCS_BROWSER_COUNT`
@@ -261,6 +324,49 @@ python -m playwright install --with-deps chromium
 - `FCS_CLUSTER_MASTER_NODE_STALE_SECONDS`
 - `FCS_CLUSTER_MASTER_DISPATCH_TIMEOUT_SECONDS`
 
+### 可选 Redis 日志存储
+
+默认行为：
+
+- `storage_backend = "sqlite"` 时，继续走 SQLite
+- `storage_backend = "redis"` 时，请求日志、子节点心跳历史、子节点错误历史写入 Redis
+- `cluster_nodes` 的当前节点状态快照仍保留在 SQLite，因为它是覆盖写，不是历史累积日志
+- `startup_clear_on_boot = true` 时，服务启动后会自动清理 SQLite 历史日志，并执行数据库压缩
+- `auto_clear_interval_minutes > 0` 时，服务会按间隔自动清空请求日志、子节点心跳历史和子节点错误历史
+  - 不会清空用户剩余次数、已用次数，也不会删除 `session_quota_events`
+
+配置示例：
+
+```toml
+[log]
+level = "INFO"
+storage_backend = "redis"   # sqlite | redis
+redis_url = "redis://127.0.0.1:6379/0"
+redis_key_prefix = "fcs"
+redis_max_entries = 20000
+startup_clear_on_boot = true
+auto_clear_interval_minutes = 0
+```
+
+等价环境变量：
+
+- `FCS_LOG_STORAGE_BACKEND=redis`
+- `FCS_LOG_REDIS_URL=redis://127.0.0.1:6379/0`
+- `FCS_LOG_REDIS_KEY_PREFIX=fcs`
+- `FCS_LOG_REDIS_MAX_ENTRIES=20000`
+- `FCS_LOG_STARTUP_CLEAR_ON_BOOT=true`
+- `FCS_LOG_AUTO_CLEAR_INTERVAL_MINUTES=30`
+
+关闭 Redis，恢复默认 SQLite：
+
+- `FCS_LOG_STORAGE_BACKEND=sqlite`
+
+说明：
+
+- `subnode` 接收来自 `master` 的内部调用时，不再持久化请求日志，避免重复写入
+- `redis_max_entries` 用于限制 Redis 历史日志长度，避免 Redis 继续无限增长
+- 定时清理日志只删除日志历史，不会影响额度扣减结果和用户使用次数统计
+
 ### 一个容易忽略的点
 
 ```text
@@ -274,11 +380,12 @@ cluster.node_max_concurrency = 0
 
 ---
 
-## 快速开始
+## 手工启动
 
 ### 方式一：本地单机 `standalone`
 
-这是最适合第一次跑通服务的方式。
+如果你只是想把服务跑起来，优先用前面的脚本入口。
+这一节只保留“不使用脚本时”的手工命令。
 
 #### 1. 创建虚拟环境
 
@@ -335,26 +442,27 @@ python main.py
 
 对应文件：`docker-compose.headed.yml`
 
-#### 1. 准备目录
+推荐脚本：
 
-```bash
-mkdir -p data config
-cp config/setting_example.toml data/setting.toml
+```powershell
+.\scripts\deploy.ps1 standalone
 ```
 
-#### 2. 启动
+手工方式：
 
 ```bash
+mkdir -p data
+cp config/setting_example.toml data/setting.toml
 docker compose -f docker-compose.headed.yml up -d --build
 ```
 
-#### 3. 访问
+访问：
 
 - 用户门户：`http://127.0.0.1:8060/`
 - 管理后台：`http://127.0.0.1:8060/admin`
 - 健康检查：`http://127.0.0.1:8060/api/v1/health`
 
-#### 4. 说明
+说明：
 
 - 该模式使用 `Dockerfile.headed`
 - 镜像内已安装 `Playwright Chromium + Xvfb + fluxbox`
@@ -492,9 +600,175 @@ POST /api/v1/custom-score
 - `action`
 - `enterprise`
 
+### 教程 E：`YesCaptcha` 兼容接口
+
+如果上游已经按 `YesCaptcha` 的请求格式接入，可以直接调用：
+
+```text
+POST /createTask
+POST /getTaskResult
+POST /getBalance
+```
+
+当前支持的 `task.type`：
+
+- `NoCaptchaTaskProxyless`
+- `RecaptchaV2TaskProxyless`
+- `RecaptchaV2EnterpriseTaskProxyless`
+- `RecaptchaV3TaskProxyless`
+- `RecaptchaV3TaskProxylessM1`
+- `RecaptchaV3TaskProxylessM1S7`
+- `RecaptchaV3TaskProxylessM1S9`
+- `RecaptchaV3EnterpriseTaskProxyless`
+- `TurnstileTaskProxyless`
+- `TurnstileTaskProxylessM1`
+- `TurnstileTaskProxylessM1S1`
+- `TurnstileTaskProxylessM1S2`
+- `TurnstileTaskProxylessM1S3`
+
+#### `task.type` 对照说明
+
+- `NoCaptchaTaskProxyless`、`RecaptchaV2TaskProxyless`
+  - 本地统一映射为 `reCAPTCHA V2`
+  - 默认按 `isInvisible=true` 走 invisible；如果请求里显式传 `isInvisible=false`，会按普通 V2 widget 方式执行
+  - 返回 `solution.gRecaptchaResponse` 和 `solution.token`
+
+- `RecaptchaV2EnterpriseTaskProxyless`
+  - 本地映射为 `reCAPTCHA V2 Enterprise`
+  - 仍然支持 `isInvisible`
+  - 返回 `solution.gRecaptchaResponse` 和 `solution.token`
+
+- `RecaptchaV3TaskProxyless`、`RecaptchaV3TaskProxylessM1`、`RecaptchaV3TaskProxylessM1S7`、`RecaptchaV3TaskProxylessM1S9`
+  - 本地统一映射为同一条 `reCAPTCHA V3` 求解链路
+  - `pageAction`、`action`、`websiteAction` 会被归一化成同一个 `action`
+  - 这些 `M1 / S7 / S9` 在当前服务里只是协议兼容别名，不额外承诺官方同名任务的特殊求解策略
+  - 返回 `solution.gRecaptchaResponse` 和 `solution.token`
+
+- `RecaptchaV3EnterpriseTaskProxyless`
+  - 本地映射为 `reCAPTCHA V3 Enterprise`
+  - `pageAction`、`action`、`websiteAction` 会被归一化成同一个 `action`
+  - 返回 `solution.gRecaptchaResponse` 和 `solution.token`
+
+- `TurnstileTaskProxyless`、`TurnstileTaskProxylessM1`、`TurnstileTaskProxylessM1S1`、`TurnstileTaskProxylessM1S2`、`TurnstileTaskProxylessM1S3`
+  - 本地统一映射为同一条 `Cloudflare Turnstile` 求解链路
+  - 这些 `M1 / S1 / S2 / S3` 在当前服务里也是协议兼容别名，不额外区分不同本地策略
+  - 返回 `solution.token`
+  - `Turnstile` 不会返回 `solution.gRecaptchaResponse`
+
+说明：
+
+- 原有 `/api/v1/solve`、`/finish`、`/error` 保持不变
+- 当前只支持 `proxyless` 的通用 token 任务
+- 当前不支持 `hCaptcha`、`FunCaptcha`、代理型任务
+- `getBalance` 返回的是当前 API Key 剩余次数；无限额度 Key 会返回 `999999999`
+- `YesCaptcha` 兼容层是标准轮询模式，只保证 `token ready`
+  - 如果你需要“打码后继续等待上游业务请求完成再回收”的会话语义，请继续使用原生 `/api/v1/solve -> finish/error`
+
+#### 等待逻辑说明
+
+- `createTask` 只是创建异步任务，不会像原生 `/api/v1/solve` 一样建立一条等待 `finish/error` 回收的业务会话
+- `getTaskResult` 返回 `status = ready`，表示当前 `token` 已经可用
+- `ready` 不代表你的上游业务请求已经成功，也不代表服务还会继续替你等待真实业务完成
+- 标准 `YesCaptcha` 协议本身没有 `finish/error` 这类回调，所以它天然无法完整复刻原生接口“获取 token 后继续等待上游完成”的语义
+- 如果你的业务必须依赖“同一浏览器上下文继续保活，直到真实请求结束”，请继续使用原生 `/api/v1/solve -> finish/error`
+- 如果你的业务只是想兼容 `YesCaptcha createTask/getTaskResult` 的调用格式，并且目标只是拿到可用 `token`，直接用当前兼容层即可
+
+#### 1. 创建任务
+
+```bash
+curl -X POST "http://127.0.0.1:8060/createTask" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientKey": "<YOUR_API_KEY>",
+    "task": {
+      "type": "RecaptchaV3TaskProxyless",
+      "websiteURL": "https://example.com/login",
+      "websiteKey": "site-key",
+      "pageAction": "login"
+    }
+  }'
+```
+
+返回示例：
+
+```json
+{
+  "errorId": 0,
+  "taskId": 1774442208718
+}
+```
+
+#### 2. 轮询任务结果
+
+```bash
+curl -X POST "http://127.0.0.1:8060/getTaskResult" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientKey": "<YOUR_API_KEY>",
+    "taskId": 1774442208718
+  }'
+```
+
+处理中：
+
+```json
+{
+  "errorId": 0,
+  "taskId": 1774442208718,
+  "status": "processing"
+}
+```
+
+完成后，如果是 `reCAPTCHA`，返回示例：
+
+```json
+{
+  "errorId": 0,
+  "taskId": 1774442208718,
+  "status": "ready",
+  "solution": {
+    "gRecaptchaResponse": "token-value",
+    "token": "token-value",
+    "userAgent": "Mozilla/5.0 ..."
+  }
+}
+```
+
+完成后，如果是 `Turnstile`，返回示例：
+
+```json
+{
+  "errorId": 0,
+  "taskId": 1774442208718,
+  "status": "ready",
+  "solution": {
+    "token": "turnstile-token",
+    "userAgent": "Mozilla/5.0 ..."
+  }
+}
+```
+
+#### 3. 查询余额
+
+```bash
+curl -X POST "http://127.0.0.1:8060/getBalance" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientKey": "<YOUR_API_KEY>"
+  }'
+```
+
 ---
 
-## 集群部署教程
+## 手工集群部署
+
+如果你只是想先把集群跑起来，优先使用前面的脚本入口。
+
+这一节只保留：
+
+- 每种集群模式适用于什么场景
+- 手工排查时最短的 compose 命令
+- 哪些关键变量必须自己确认
 
 ### 1. Docker 部署 `master`
 
@@ -506,38 +780,36 @@ POST /api/v1/custom-score
 - 只调度，不本地打码
 - 镜像更轻，不安装 Chromium
 
-#### 启动步骤
+推荐脚本：
 
-1. 准备配置目录
+```powershell
+.\scripts\deploy.ps1 master
+```
+
+手工方式：
 
 ```bash
-mkdir -p data/master config
+mkdir -p data/master
 cp config/setting_example.toml data/master/setting.toml
-```
-
-2. 启动前确认角色
-
-```text
-FCS_CLUSTER_ROLE=master
-```
-
-3. 启动
-
-```bash
 docker compose -f docker-compose.cluster.master.yml up -d --build
 ```
 
-#### 默认访问入口
+默认访问入口：
 
 - 管理后台：`http://127.0.0.1:8060/admin`
 - 用户门户：`http://127.0.0.1:8060/`
 - 健康检查：`http://127.0.0.1:8060/api/v1/health`
 
-#### 说明
+说明：
 
 - `master` 使用 `Dockerfile.master`
 - 不安装 `Playwright/Chromium`
 - 当前 compose 默认挂载是 `./data/master:/app/data`
+- 当前 compose 会同时启动 `Redis`
+- 当前 compose 默认将日志后端设为 `redis`
+- 如果你不想启用 Redis，可在启动前覆盖：
+  - `FCS_LOG_STORAGE_BACKEND=sqlite`
+  - 或直接改 `data/master/setting.toml`
 
 ### 2. Docker 部署 `subnode`
 
@@ -549,50 +821,49 @@ docker compose -f docker-compose.cluster.master.yml up -d --build
 - 本地有头浏览器打码
 - 向 `master` 注册与发送心跳
 
-#### 启动前必须替换的变量
+推荐脚本：
 
-- `FCS_CLUSTER_MASTER_BASE_URL`
-- `FCS_CLUSTER_MASTER_CLUSTER_KEY`
-- `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
-- `FCS_CLUSTER_NODE_API_KEY`
+```powershell
+.\scripts\deploy.ps1 subnode `
+  -MasterBaseUrl http://host.docker.internal:8060 `
+  -MasterClusterKey <你的主节点 key> `
+  -NodePublicBaseUrl http://host.docker.internal:8061
+```
 
-#### 启动步骤
-
-1. 准备配置目录
+手工方式：
 
 ```bash
-mkdir -p data/subnode config
+mkdir -p data/subnode deploy
 cp config/setting_example.toml data/subnode/setting.toml
+cp deploy/subnode.env.example deploy/subnode.env.local
 ```
 
-2. 修改关键环境变量
+然后修改 `deploy/subnode.env.local`。
 
-默认 compose 里是示例值，不能直接拿到生产环境使用。
-
-重点解释：
+必须确认以下 4 个值：
 
 - `FCS_CLUSTER_MASTER_BASE_URL`
-  - 填 `master` 实际可访问地址
+  - 子节点访问主节点的地址
 - `FCS_CLUSTER_MASTER_CLUSTER_KEY`
-  - 填主节点 cluster key
+  - 主节点当前使用的 cluster key
 - `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
-  - 填主节点能访问到的当前子节点地址
+  - 主节点回调当前子节点的地址
 - `FCS_CLUSTER_NODE_API_KEY`
-  - 填子节点内部认证 key
+  - 子节点内部认证 key
 
-3. 启动
+最后启动：
 
 ```bash
-docker compose -f docker-compose.cluster.subnode.yml up -d --build
+docker compose --env-file deploy/subnode.env.local -f docker-compose.cluster.subnode.yml up -d --build
 ```
 
-#### 默认访问入口
+默认访问入口：
 
 - 子节点状态页：`http://127.0.0.1:8061/`
 - 管理后台：`http://127.0.0.1:8061/admin`
 - 健康检查：`http://127.0.0.1:8061/api/v1/health`
 
-#### 非常重要的注意事项
+非常重要的注意事项：
 
 - `FCS_CLUSTER_NODE_PUBLIC_BASE_URL` 不能填 `127.0.0.1`
 - 不能填 `localhost`
@@ -610,28 +881,37 @@ docker compose -f docker-compose.cluster.subnode.yml up -d --build
 
 这是最推荐的最小集群示例。
 
-#### 1. 准备 `.env`
+推荐脚本：
 
-```env
-FCS_MASTER_NODE_NAME=master-1
-FCS_SUBNODE_NODE_NAME=subnode-1
-FCS_CLUSTER_MASTER_CLUSTER_KEY=replace-with-master-cluster-key
-FCS_CLUSTER_NODE_API_KEY=replace-with-node-internal-key
-FCS_CLUSTER_MASTER_BASE_URL=http://flow-captcha-master:8060
-FCS_CLUSTER_NODE_PUBLIC_BASE_URL=http://flow-captcha-subnode:8060
-FCS_CLUSTER_NODE_WEIGHT=100
-FCS_CLUSTER_NODE_MAX_CONCURRENCY=0
-FCS_CLUSTER_HEARTBEAT_INTERVAL_SECONDS=15
-FCS_LOG_LEVEL=INFO
+```powershell
+.\scripts\deploy.ps1 stack
 ```
 
-#### 2. 启动
+手工方式：
 
 ```bash
-docker compose -f docker-compose.cluster.stack.yml up -d --build
+mkdir -p data/master data/subnode deploy
+cp config/setting_example.toml data/master/setting.toml
+cp config/setting_example.toml data/subnode/setting.toml
+cp deploy/stack.env.example deploy/stack.env.local
 ```
 
-#### 3. 访问
+然后修改 `deploy/stack.env.local`。
+
+至少要确认这些值：
+
+- `FCS_CLUSTER_MASTER_CLUSTER_KEY`
+- `FCS_CLUSTER_NODE_API_KEY`
+- 如果不是容器内互联场景，还要改
+  `FCS_CLUSTER_MASTER_BASE_URL` 和 `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
+
+最后启动：
+
+```bash
+docker compose --env-file deploy/stack.env.local -f docker-compose.cluster.stack.yml up -d --build
+```
+
+访问：
 
 - master 用户门户：`http://127.0.0.1:8060/`
 - master 管理后台：`http://127.0.0.1:8060/admin`
@@ -639,15 +919,20 @@ docker compose -f docker-compose.cluster.stack.yml up -d --build
 - subnode 状态页：`http://127.0.0.1:8061/`
 - subnode 健康检查：`http://127.0.0.1:8061/api/v1/health`
 
-#### 4. 这个 compose 的优点
+这个 compose 的优点
 
 - 已把 `master` 和 `subnode` 的数据目录拆开
+- 已内置 `Redis` 服务给日志/心跳/错误历史使用
 - 默认更适合作为第一次验证集群调度的示例
+- 默认会把日志后端设为 `redis`
+- 如果你想退回 SQLite，把 `deploy/stack.env.local` 里的
+  `FCS_LOG_STORAGE_BACKEND=sqlite`
 
 挂载如下：
 
 - `./data/master:/app/data`
 - `./data/subnode:/app/data`
+- `./data/redis:/data`
 
 ---
 
@@ -665,6 +950,7 @@ docker compose -f docker-compose.cluster.stack.yml up -d --build
 - 建议修改 `FCS_NODE_NAME`
 - 建议修改管理员账号密码
 - 如果有多个子节点，建议统一规划 cluster key
+- 如果不想使用 Redis 日志后端，显式设置 `FCS_LOG_STORAGE_BACKEND=sqlite`
 
 ### `subnode`
 
@@ -673,12 +959,15 @@ docker compose -f docker-compose.cluster.stack.yml up -d --build
 - 必改 `FCS_CLUSTER_NODE_PUBLIC_BASE_URL`
 - 必改 `FCS_CLUSTER_NODE_API_KEY`
 - 建议修改 `FCS_NODE_NAME`
+- 推荐放在 `deploy/subnode.env.local`
 
 ### `stack`
 
 - 必改 `FCS_CLUSTER_MASTER_CLUSTER_KEY`
 - 必改 `FCS_CLUSTER_NODE_API_KEY`
 - 如果不是容器内互联场景，要改 master/subnode 的实际对外地址
+- 默认已启用 Redis 日志后端；如需退回 SQLite，改 `FCS_LOG_STORAGE_BACKEND=sqlite`
+- 推荐放在 `deploy/stack.env.local`
 
 ---
 
