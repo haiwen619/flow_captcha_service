@@ -14,8 +14,7 @@ import time
 import re
 import random
 import uuid
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List, Set, Union, Callable, Awaitable, Tuple
+from typing import Optional, Dict, Any, List, Union, Callable, Awaitable, Tuple
 from datetime import datetime
 from urllib.parse import urlparse, unquote, parse_qs
 
@@ -297,47 +296,12 @@ def normalize_browser_proxy_url(proxy_url: str) -> tuple[Optional[str], Optional
 
     return proxy_url, None
 
-def split_browser_proxy_pool(proxy_value: str) -> List[str]:
-    """Split a proxy pool string into a list using newlines, commas, or semicolons."""
-    if not proxy_value:
-        return []
-    parts = re.split(r"[\n,;]+", str(proxy_value))
-    return [part.strip() for part in parts if part and part.strip()]
-
-
-def select_browser_proxy_from_pool(proxy_value: str, slot_key: Optional[int] = None) -> Optional[str]:
-    """Pick one proxy from a pool string and keep the choice stable for the same slot."""
-    proxy_pool = split_browser_proxy_pool(proxy_value)
-    if not proxy_pool:
-        return None
-    if slot_key is None:
-        return proxy_pool[0]
-    return proxy_pool[int(slot_key) % len(proxy_pool)]
-
-
 def validate_browser_proxy_url(proxy_url: str) -> tuple[bool, str]:
-    proxy_pool = split_browser_proxy_pool(proxy_url)
-    if not proxy_pool:
-        return True, None
-    for index, raw_proxy in enumerate(proxy_pool, start=1):
-        normalized_proxy_url, _ = normalize_browser_proxy_url(raw_proxy)
-        parsed = parse_proxy_url(normalized_proxy_url)
-        if not parsed:
-            return False, f"Proxy pool entry {index} has an invalid format"
+    if not proxy_url: return True, None
+    normalized_proxy_url, _ = normalize_browser_proxy_url(proxy_url)
+    parsed = parse_proxy_url(normalized_proxy_url)
+    if not parsed: return False, "代理格式错误"
     return True, None
-
-
-@dataclass
-class TokenAcquireResult:
-    token: Optional[str]
-    browser_ref: Optional[Union[int, str]]
-    browser_id: Optional[int]
-    fingerprint: Optional[Dict[str, Any]] = None
-    source: str = "live"
-    elapsed_ms: int = 0
-    browser_epoch: int = 0
-    timings: Optional[Dict[str, int]] = None
-
 
 class TokenBrowser:
     """简化版浏览器：每次获取 token 时启动新浏览器，用完即关
@@ -467,9 +431,6 @@ class TokenBrowser:
         self._consecutive_browser_failures = 0
         self._solve_inflight = 0
         self._last_idle_since = time.monotonic()
-        self._diag_counters: Dict[str, int] = {}
-        self._last_failure: Optional[Dict[str, Any]] = None
-        self._last_success: Optional[Dict[str, Any]] = None
         self._refresh_browser_profile()
 
     def _refresh_browser_profile(self):
@@ -479,33 +440,6 @@ class TokenBrowser:
         self._profile_viewport = {
             "width": base_w,
             "height": base_h - random.randint(0, 80),
-        }
-
-    def _record_diag(self, category: str, message: Optional[str] = None, *, failure: bool = False):
-        category = str(category or "").strip()
-        if not category:
-            return
-        self._diag_counters[category] = int(self._diag_counters.get(category, 0) or 0) + 1
-        if failure:
-            self._last_failure = {
-                "category": category,
-                "message": (message or "")[:200],
-                "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            }
-
-    def _record_success(self, category: str):
-        category = str(category or "").strip() or "success"
-        self._last_success = {
-            "category": category,
-            "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        }
-
-    def get_diag_snapshot(self) -> Dict[str, Any]:
-        return {
-            "counters": dict(sorted(self._diag_counters.items())),
-            "last_failure": dict(self._last_failure) if self._last_failure else None,
-            "last_success": dict(self._last_success) if self._last_success else None,
-            "consecutive_browser_failures": int(self._consecutive_browser_failures or 0),
         }
 
     def _get_slot_marker(self) -> str:
@@ -678,18 +612,6 @@ class TokenBrowser:
                     proxy_source = "global"
 
             if candidate_proxy_url:
-                selected_proxy_url = select_browser_proxy_from_pool(
-                    candidate_proxy_url,
-                    slot_key=self.token_id,
-                )
-                if selected_proxy_url and selected_proxy_url != candidate_proxy_url:
-                    pool_size = len(split_browser_proxy_pool(candidate_proxy_url))
-                    self._record_diag("proxy_pool_selected")
-                    debug_logger.log_info(
-                        f"[BrowserCaptcha] Token-{self.token_id} selected proxy "
-                        f"{(self.token_id % pool_size) + 1}/{pool_size} from {proxy_source} proxy pool"
-                    )
-                    candidate_proxy_url = selected_proxy_url
                 normalized_proxy_url, proxy_warning = normalize_browser_proxy_url(candidate_proxy_url)
                 if proxy_warning:
                     debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} {proxy_warning}")
@@ -697,21 +619,14 @@ class TokenBrowser:
                 if proxy_option:
                     raw_proxy_url = normalized_proxy_url
                     self._browser_proxy_active = True
-                    self._record_diag(f"proxy_source_{proxy_source}")
                     debug_logger.log_info(
                         f"[BrowserCaptcha] Token-{self.token_id} using {proxy_source} proxy: {proxy_option['server']}"
                     )
                 else:
-                    self._record_diag(
-                        "proxy_format_invalid",
-                        f"{proxy_source}:{candidate_proxy_url[:120]}",
-                        failure=True,
-                    )
                     debug_logger.log_warning(
                         f"[BrowserCaptcha] Token-{self.token_id} {proxy_source} proxy format is invalid and has been ignored"
                     )
         except Exception as e:
-            self._record_diag("proxy_config_read_failed", str(e), failure=True)
             debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} failed to read proxy configuration: {e}")
 
         return proxy_option, raw_proxy_url, proxy_source
@@ -727,13 +642,11 @@ class TokenBrowser:
             await self._cleanup_stale_slot_process()
         playwright = await async_playwright().start()
         browser_executable_path = os.environ.get("BROWSER_EXECUTABLE_PATH", "").strip() or None
-        proxy_option, raw_proxy_url, proxy_source = await self._resolve_proxy_runtime_config(token_proxy_url=token_proxy_url)
+        proxy_option, raw_proxy_url, _ = await self._resolve_proxy_runtime_config(token_proxy_url=token_proxy_url)
 
         # 先只记录代理，真实 UA/UA-CH 交给浏览器自己暴露，避免 user-agent 与 sec-ch-ua 版本错位。
         self._last_fingerprint = {
             "proxy_url": raw_proxy_url if raw_proxy_url else None,
-            "proxy_source": proxy_source,
-            "proxy_active": bool(raw_proxy_url),
         }
 
         try:
@@ -776,7 +689,6 @@ class TokenBrowser:
                 proxy=proxy_option,
                 args=browser_args,
             )
-            self._record_diag("browser_launch_with_proxy" if raw_proxy_url else "browser_launch_without_proxy")
             context = await browser.new_context(
                 viewport=viewport,
                 locale="en-US",
@@ -789,7 +701,6 @@ class TokenBrowser:
             )
             return playwright, browser, context
         except Exception as e:
-            self._record_diag("browser_launch_failed", str(e), failure=True)
             debug_logger.log_error(f"[BrowserCaptcha] Token-{self.token_id} browser launch failed: {type(e).__name__}: {str(e)[:200]}")
             try:
                 if playwright:
@@ -1271,7 +1182,6 @@ class TokenBrowser:
                     if not any(d in failed_url for d in ["google.com", "gstatic.com", "recaptcha.net"]):
                         return
                     failure = request.failure or ""
-                    self._record_diag("flow_resource_request_failed", f"{failed_url[:160]} | {failure}")
                     debug_logger.log_warning(
                         f"[BrowserCaptcha] Token-{self.token_id} 资源加载失败: url={failed_url[:200]}, error={failure}"
                     )
@@ -1306,14 +1216,12 @@ class TokenBrowser:
             try:
                 await page.goto(page_url, wait_until="load", timeout=30000)
             except Exception as e:
-                self._record_diag("flow_page_goto_failed", str(e), failure=True)
                 debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} page.goto 失败: {type(e).__name__}: {str(e)[:200]}")
                 return None
             
             try:
                 await page.wait_for_function("typeof grecaptcha !== 'undefined'", timeout=15000)
             except Exception as e:
-                self._record_diag("flow_grecaptcha_not_ready", str(e), failure=True)
                 debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} grecaptcha 未就绪: {type(e).__name__}: {str(e)[:200]}")
                 return None
 
@@ -1338,7 +1246,6 @@ class TokenBrowser:
             try:
                 await asyncio.wait_for(reload_ok_event.wait(), timeout=12)
             except asyncio.TimeoutError:
-                self._record_diag("flow_reload_timeout", failure=True)
                 debug_logger.log_warning(
                     f"[BrowserCaptcha] Token-{self.token_id} 等待 recaptcha enterprise/reload 200 超时"
                 )
@@ -1347,7 +1254,6 @@ class TokenBrowser:
             try:
                 await asyncio.wait_for(clr_ok_event.wait(), timeout=12)
             except asyncio.TimeoutError:
-                self._record_diag("flow_clr_timeout", failure=True)
                 debug_logger.log_warning(
                     f"[BrowserCaptcha] Token-{self.token_id} 等待 recaptcha enterprise/clr 200 超时"
                 )
@@ -1361,11 +1267,9 @@ class TokenBrowser:
                 )
                 await asyncio.sleep(post_wait_seconds)
 
-            self._record_success("flow_token_acquired")
             return token
         except Exception as e:
             msg = f"{type(e).__name__}: {str(e)}"
-            self._record_diag("flow_execute_exception", msg, failure=True)
             debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 打码失败: {msg[:200]}")
             return None
         finally:
@@ -1413,7 +1317,6 @@ class TokenBrowser:
                     if not any(d in failed_url for d in ["google.com", "gstatic.com", "recaptcha.net", "antcpt.com"]):
                         return
                     failure = request.failure or ""
-                    self._record_diag("custom_resource_request_failed", f"{failed_url[:160]} | {failure}")
                     debug_logger.log_warning(
                         f"[BrowserCaptcha] Token-{self.token_id} 自定义资源加载失败: url={failed_url[:200]}, error={failure}"
                     )
@@ -1425,7 +1328,6 @@ class TokenBrowser:
             try:
                 await page.goto(website_url, wait_until="domcontentloaded", timeout=30000)
             except Exception as e:
-                self._record_diag("custom_page_goto_failed", str(e), failure=True)
                 debug_logger.log_warning(
                     f"[BrowserCaptcha] Token-{self.token_id} 自定义 page.goto 失败: {type(e).__name__}: {str(e)[:200]}"
                 )
@@ -1502,7 +1404,6 @@ class TokenBrowser:
                     """, f"{primary_host}/{script_path}?render={website_key}", f"{secondary_host}/{script_path}?render={website_key}")
                     await page.wait_for_function(wait_expression, timeout=15000)
                 except Exception as inject_error:
-                    self._record_diag("custom_grecaptcha_not_ready", str(inject_error), failure=True)
                     debug_logger.log_warning(
                         f"[BrowserCaptcha] Token-{self.token_id} 自定义 grecaptcha 最终未就绪: {type(inject_error).__name__}: {str(inject_error)[:200]}"
                     )
@@ -1554,11 +1455,9 @@ class TokenBrowser:
                     **verify_payload,
                 }
 
-            self._record_success("custom_token_acquired")
             return token
         except Exception as e:
             msg = f"{type(e).__name__}: {str(e)}"
-            self._record_diag("custom_execute_exception", msg, failure=True)
             debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 自定义打码失败: {msg[:200]}")
             return None
         finally:
@@ -1611,7 +1510,6 @@ class TokenBrowser:
                         if token:
                             self._solve_count += 1
                             self._consecutive_browser_failures = 0
-                            self._record_success("token_acquired")
                             debug_logger.log_info(
                                 f"[BrowserCaptcha] Token-{self.token_id} 打码成功，已获取 reCAPTCHA token "
                                 f"({(time.time()-start_ts)*1000:.0f}ms, launches={self._shared_launch_count}, reuse={self._shared_reuse_count})"
@@ -1620,7 +1518,6 @@ class TokenBrowser:
 
                         self._error_count += 1
                         self._consecutive_browser_failures += 1
-                        self._record_diag("token_empty_result", failure=True)
                         debug_logger.log_warning(
                             f"[BrowserCaptcha] Token-{self.token_id} token attempt {attempt + 1}/{max_retries} failed"
                         )
@@ -1630,7 +1527,6 @@ class TokenBrowser:
                         self._error_count += 1
                         self._consecutive_browser_failures += 1
                         error_message = f"{type(e).__name__}: {str(e)}"
-                        self._record_diag("browser_runtime_error", error_message, failure=True)
                         debug_logger.log_error(
                             f"[BrowserCaptcha] Token-{self.token_id} browser error: {error_message[:200]}"
                         )
@@ -1687,20 +1583,17 @@ class TokenBrowser:
 
                         if token:
                             self._solve_count += 1
-                            self._record_success("custom_token_acquired")
                             debug_logger.log_info(
                                 f"[BrowserCaptcha] Token-{self.token_id} custom token acquired ({(time.time()-start_ts)*1000:.0f}ms)"
                             )
                             return token
 
                         self._error_count += 1
-                        self._record_diag("custom_token_empty_result", failure=True)
                         debug_logger.log_warning(
                             f"[BrowserCaptcha] Token-{self.token_id} custom token attempt {attempt+1}/{max_retries} failed"
                         )
                     except Exception as e:
                         self._error_count += 1
-                        self._record_diag("custom_browser_error", str(e), failure=True)
                         debug_logger.log_error(
                             f"[BrowserCaptcha] Token-{self.token_id} custom browser error: {type(e).__name__}: {str(e)[:200]}"
                         )
@@ -1757,7 +1650,6 @@ class TokenBrowser:
 
                         if isinstance(payload, dict) and payload.get("token"):
                             self._solve_count += 1
-                            self._record_success("custom_score_acquired")
                             payload.setdefault("token_elapsed_ms", int((time.time() - started_at) * 1000))
                             debug_logger.log_info(
                                 f"[BrowserCaptcha] Token-{self.token_id} in-page score verification succeeded ({(time.time()-started_at)*1000:.0f}ms)"
@@ -1765,13 +1657,11 @@ class TokenBrowser:
                             return payload
 
                         self._error_count += 1
-                        self._record_diag("custom_score_empty_result", failure=True)
                         debug_logger.log_warning(
                             f"[BrowserCaptcha] Token-{self.token_id} in-page score attempt {attempt+1}/{max_retries} failed"
                         )
                     except Exception as e:
                         self._error_count += 1
-                        self._record_diag("score_browser_error", str(e), failure=True)
                         debug_logger.log_error(
                             f"[BrowserCaptcha] Token-{self.token_id} in-page score browser error: {type(e).__name__}: {str(e)[:200]}"
                         )
@@ -1829,9 +1719,7 @@ class BrowserCaptchaService:
             "req_total": 0,
             "gen_ok": 0,
             "gen_fail": 0,
-            "api_403": 0,
-            "report_error_total": 0,
-            "report_error_recycled": 0,
+            "api_403": 0
         }
         
         # ?????? _load_browser_count ???????
@@ -2119,9 +2007,20 @@ class BrowserCaptchaService:
         action: str = "IMAGE_GENERATION",
         token_id: int = None,
         proxy_url_override: Optional[str] = None,
-    ) -> TokenAcquireResult:
-        """获取 reCAPTCHA Token（轮询分配到不同浏览器）"""
+    ) -> tuple[Optional[str], Union[int, str]]:
+        """获取 reCAPTCHA Token（轮询分配到不同浏览器）
+        
+        Args:
+            project_id: 项目 ID
+            action: reCAPTCHA action
+            token_id: 业务 token id（仅用于读取 token 级打码代理）
+        
+        Returns:
+            (token, browser_ref) 元组，browser_ref 包含 browser_id 与请求级 request_ref
+        """
+        # 检查服务是否可用
         self._check_available()
+        
         self._stats["req_total"] += 1
         token_proxy_url = proxy_url_override or await self._resolve_token_proxy_url(token_id)
         if not token_proxy_url and self._external_proxy_resolver:
@@ -2129,42 +2028,51 @@ class BrowserCaptchaService:
                 token_proxy_url, _ = await self._external_proxy_resolver(token_id)
             except Exception as e:
                 debug_logger.log_warning(f"[BrowserCaptcha] external proxy resolve failed: {e}")
-
+        
+        # 全局并发限制（如果已配置）
         if self._token_semaphore:
             async with self._token_semaphore:
+                # 轮询选择浏览器
                 browser_id = await self._select_browser_id(project_id)
                 try:
                     browser = await self._get_or_create_browser(browser_id)
                     token, request_ref = await browser.get_token(
-                        project_id, self.website_key, action, token_proxy_url=token_proxy_url
+                        project_id,
+                        self.website_key,
+                        action,
+                        token_proxy_url=token_proxy_url
                     )
                 finally:
                     await self._release_slot_reservation(browser_id)
-        else:
-            browser_id = await self._select_browser_id(project_id)
-            try:
-                browser = await self._get_or_create_browser(browser_id)
-                token, request_ref = await browser.get_token(
-                    project_id, self.website_key, action, token_proxy_url=token_proxy_url
-                )
-            finally:
-                await self._release_slot_reservation(browser_id)
-
+            
+            if token:
+                self._stats["gen_ok"] += 1
+            else:
+                self._stats["gen_fail"] += 1
+                
+            self._log_stats()
+            return token, self._compose_browser_ref(browser_id, request_ref)
+        
+        # 无并发限制时直接执行
+        browser_id = await self._select_browser_id(project_id)
+        try:
+            browser = await self._get_or_create_browser(browser_id)
+            token, request_ref = await browser.get_token(
+                project_id,
+                self.website_key,
+                action,
+                token_proxy_url=token_proxy_url
+            )
+        finally:
+            await self._release_slot_reservation(browser_id)
+        
         if token:
             self._stats["gen_ok"] += 1
         else:
             self._stats["gen_fail"] += 1
-
+            
         self._log_stats()
-        browser_ref = self._compose_browser_ref(browser_id, request_ref)
-        fingerprint = browser.get_last_fingerprint() if browser else None
-        return TokenAcquireResult(
-            token=token,
-            browser_ref=browser_ref,
-            browser_id=browser_id,
-            fingerprint=fingerprint,
-            source="live",
-        )
+        return token, self._compose_browser_ref(browser_id, request_ref)
 
     async def get_custom_token(
         self,
@@ -2172,10 +2080,8 @@ class BrowserCaptchaService:
         website_key: str,
         action: str = "homepage",
         enterprise: bool = False,
-        captcha_type: str = "recaptcha_v3",
-        is_invisible: bool = True,
         proxy_url_override: Optional[str] = None,
-    ) -> TokenAcquireResult:
+    ) -> tuple[Optional[str], int]:
         """获取任意站点的 reCAPTCHA token，用于分数测试。"""
         self._check_available()
 
@@ -2190,24 +2096,18 @@ class BrowserCaptchaService:
                     enterprise=enterprise,
                     token_proxy_url=proxy_url_override,
                 )
-        else:
-            browser_id = self._get_next_browser_id()
-            browser = await self._get_or_create_browser(browser_id)
-            token = await browser.get_custom_token(
-                website_url=website_url,
-                website_key=website_key,
-                action=action,
-                enterprise=enterprise,
-                token_proxy_url=proxy_url_override,
-            )
-        fingerprint = browser.get_last_fingerprint() if browser else None
-        return TokenAcquireResult(
-            token=token,
-            browser_ref=browser_id,
-            browser_id=browser_id,
-            fingerprint=fingerprint,
-            source="live",
+            return token, browser_id
+
+        browser_id = self._get_next_browser_id()
+        browser = await self._get_or_create_browser(browser_id)
+        token = await browser.get_custom_token(
+            website_url=website_url,
+            website_key=website_key,
+            action=action,
+            enterprise=enterprise,
+            token_proxy_url=proxy_url_override,
         )
+        return token, browser_id
 
     async def get_custom_score(
         self,
@@ -2268,7 +2168,6 @@ class BrowserCaptchaService:
     async def report_error(self, browser_ref: Optional[Union[int, str]] = None, error_reason: Optional[str] = None):
         """Handle upstream errors; recycle the browser only for explicit reCAPTCHA evaluation failures."""
         browser_id, _ = self._parse_browser_ref(browser_ref)
-        self._stats["report_error_total"] += 1
 
         async with self._browsers_lock:
             browser = self._browsers.get(browser_id) if browser_id is not None else None
@@ -2281,9 +2180,6 @@ class BrowserCaptchaService:
             )
             if should_recycle:
                 self._stats["api_403"] += 1
-                self._stats["report_error_recycled"] += 1
-                if browser:
-                    browser._record_diag("upstream_recaptcha_reported", error_reason, failure=True)
             if browser_id is not None:
                 debug_logger.log_info(
                     f"[BrowserCaptcha] browser {browser_id} failure reported, reason={error_reason or 'unknown'}, recycle={should_recycle}"
@@ -2348,18 +2244,11 @@ class BrowserCaptchaService:
     def get_stats(self): 
         browser_items = []
         busy_browser_count = 0
-        proxy_enabled_browser_count = 0
-        diag_totals: Dict[str, int] = {}
         for browser_id, browser in sorted(self._browsers.items()):
             is_busy = bool(getattr(browser, "is_busy", lambda: False)())
             if is_busy:
                 busy_browser_count += 1
             fingerprint = browser.get_last_fingerprint() or {}
-            if fingerprint.get("proxy_url"):
-                proxy_enabled_browser_count += 1
-            diag_snapshot = browser.get_diag_snapshot()
-            for key, count in (diag_snapshot.get("counters") or {}).items():
-                diag_totals[key] = diag_totals.get(key, 0) + int(count or 0)
             browser_items.append({
                 "browser_id": browser_id,
                 "busy": is_busy,
@@ -2370,90 +2259,18 @@ class BrowserCaptchaService:
                 "launch_count": int(getattr(browser, "_shared_launch_count", 0) or 0),
                 "reuse_count": int(getattr(browser, "_shared_reuse_count", 0) or 0),
                 "proxy_url": fingerprint.get("proxy_url"),
-                "proxy_source": fingerprint.get("proxy_source"),
                 "user_agent": fingerprint.get("user_agent"),
-                "diagnostics": diag_snapshot,
             })
-
-        proxy_issue_count = sum(
-            value for key, value in diag_totals.items()
-            if key.startswith("proxy_")
-        )
-        runtime_issue_count = sum(
-            diag_totals.get(key, 0)
-            for key in (
-                "browser_launch_failed",
-                "browser_runtime_error",
-                "flow_page_goto_failed",
-                "custom_page_goto_failed",
-                "score_browser_error",
-                "flow_resource_request_failed",
-                "custom_resource_request_failed",
-            )
-        )
-        recaptcha_stage_issue_count = sum(
-            diag_totals.get(key, 0)
-            for key in (
-                "flow_grecaptcha_not_ready",
-                "flow_reload_timeout",
-                "flow_clr_timeout",
-                "flow_execute_exception",
-                "token_empty_result",
-                "custom_grecaptcha_not_ready",
-                "custom_execute_exception",
-                "custom_token_empty_result",
-                "custom_score_empty_result",
-            )
-        )
-
-        likely_issue = "insufficient_signal"
-        bucket_scores = {
-            "proxy_not_effective_or_proxy_config_issue": proxy_issue_count,
-            "browser_runtime_or_network_issue": runtime_issue_count,
-            "recaptcha_stage_timeout_or_not_ready": recaptcha_stage_issue_count,
-            "upstream_recaptcha_rejected_or_low_score": int(self._stats.get("api_403", 0) or 0),
-        }
-        top_label = max(bucket_scores, key=bucket_scores.get) if bucket_scores else likely_issue
-        if bucket_scores.get(top_label, 0) > 0:
-            likely_issue = top_label
-
         base_stats = {
             "total_solve_count": self._stats["gen_ok"],
             "total_error_count": self._stats["gen_fail"],
             "risk_403_count": self._stats["api_403"],
-            "report_error_total": self._stats["report_error_total"],
-            "report_error_recycled": self._stats["report_error_recycled"],
             "browser_count": len(self._browsers),
             "configured_browser_count": self._browser_count,
             "busy_browser_count": busy_browser_count,
             "idle_browser_count": max(self._browser_count - busy_browser_count, 0),
-            "proxy_enabled_browser_count": proxy_enabled_browser_count,
-            "proxy_disabled_browser_count": max(len(self._browsers) - proxy_enabled_browser_count, 0),
             "project_affinity_count": len(self._project_slot_affinity),
-            "diagnostic_counters": dict(sorted(diag_totals.items())),
-            "diagnostic_summary": {
-                "likely_issue": likely_issue,
-                "proxy_issue_count": proxy_issue_count,
-                "runtime_issue_count": runtime_issue_count,
-                "recaptcha_stage_issue_count": recaptcha_stage_issue_count,
-                "upstream_403_count": int(self._stats.get("api_403", 0) or 0),
-            },
             "browsers": browser_items,
         }
         return base_stats
-
-    async def prime_token_pool(
-        self,
-        project_id: str,
-        action: str = "IMAGE_GENERATION",
-        token_id: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Stub: flow version does not maintain a standby token pool."""
-        return {
-            "project_id": project_id,
-            "action": action,
-            "current_depth": 0,
-            "target_depth": 0,
-            "pool_enabled": False,
-        }
 

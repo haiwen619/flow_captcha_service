@@ -16,3 +16,5 @@ data/setting.toml
 data/*/setting.toml
 deploy/*.env.local
 /.vs
+/tmp/browser_pids
+/docs
